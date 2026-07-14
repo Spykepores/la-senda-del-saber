@@ -11,6 +11,7 @@ import {
   Swords, ChevronLeft, Zap, Users, Plus, ArrowRight, User, Target,
   Hourglass, Check, Send, MessageSquare, X, Upload, Download, Hash
 } from "lucide-react";
+import { getChallengeByCode } from "@/lib/sync";
 
 export default function ChallengeLobbyPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -23,13 +24,20 @@ export default function ChallengeLobbyPage() {
   const [createError, setCreateError] = useState("");
   const [sentId, setSentId] = useState<number | null>(null);
 
+  // Hooks
   const createMut = useCreateDuel();
   const joinMut = useJoinDuel();
   const acceptMut = useAcceptDuel();
   const rejectMut = useRejectDuel();
+
+  // Online players
   const onlinePlayers = useOnlinePlayers(user?.id || 0, user?.name || "Jugador");
+
+  // Public and my challenges (localStorage reactive)
   const publicChallenges = usePublicChallenges(user?.id || 0);
   const myChallenges = useMyChallenges(user?.id || 0);
+
+  // Global chat
   const { messages: globalMessages, send: sendGlobal } = useGlobalChat();
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -59,9 +67,16 @@ export default function ChallengeLobbyPage() {
   const incomingChallenges = myChallenges.filter((d: any) => d.status === "pending" && d.opponentId === myId);
   const hasActive = activeDuels.length > 0;
 
+  // ===================== ACTIONS =====================
+
   const handleRetar = async (opponent: { id: number; name: string }) => {
-    try { await createMut.mutateAsync({ opponentId: opponent.id }); setSentId(opponent.id); setTimeout(() => setSentId(null), 2000); }
-    catch (e: any) { alert(e.message || "Error al crear desafio"); }
+    try {
+      await createMut.mutateAsync({ opponentId: opponent.id });
+      setSentId(opponent.id);
+      setTimeout(() => setSentId(null), 2000);
+    } catch (e: any) {
+      alert(e.message || "Error al crear desafio");
+    }
   };
 
   const handleCrearSala = async () => {
@@ -70,9 +85,12 @@ export default function ChallengeLobbyPage() {
     try {
       const name = roomName.trim() || `Sala de ${myName}`;
       const result = await createMut.mutateAsync({ name });
-      setRoomName(""); setShowCreateForm(false);
+      setRoomName("");
+      setShowCreateForm(false);
       window.location.hash = `#/challenge/${result.id}`;
-    } catch (e: any) { setCreateError(e.message || "Error al crear sala"); }
+    } catch (e: any) {
+      setCreateError(e.message || "Error al crear sala");
+    }
   };
 
   const handleAceptar = async (challengeId: number) => {
@@ -81,7 +99,8 @@ export default function ChallengeLobbyPage() {
   };
 
   const handleRechazar = async (challengeId: number) => {
-    try { await rejectMut.mutateAsync(challengeId); } catch (e: any) { alert(e.message || "Error"); }
+    try { await rejectMut.mutateAsync(challengeId); }
+    catch (e: any) { alert(e.message || "Error"); }
   };
 
   const handleUnirse = async (challengeId: number) => {
@@ -94,11 +113,12 @@ export default function ChallengeLobbyPage() {
   const handleJoinByCode = () => {
     setJoinError("");
     if (!syncCode || syncCode.length < 6) { setJoinError("Codigo invalido"); return; }
-    const { getChallengeByCode } = require("@/lib/sync");
     const challenge = getChallengeByCode(syncCode);
     if (!challenge) { setJoinError("Codigo no encontrado"); return; }
     if (challenge.opponentId && challenge.opponentId !== 0) { setJoinError("Sala llena"); return; }
-    handleUnirse(challenge.id); setSyncCode(""); setShowJoinCode(false);
+    handleUnirse(challenge.id);
+    setSyncCode("");
+    setShowJoinCode(false);
   };
 
   const handleExport = (challengeId: number) => {
@@ -107,7 +127,9 @@ export default function ChallengeLobbyPage() {
       const blob = new Blob([data], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = `senda_sala_${challengeId}.json`; a.click();
+      a.href = url;
+      a.download = `senda_sala_${challengeId}.json`;
+      a.click();
       URL.revokeObjectURL(url);
     }
   };
@@ -131,14 +153,17 @@ export default function ChallengeLobbyPage() {
 
   return (
     <div className="min-h-screen bg-indigo-950 text-white flex">
+      {/* MAIN */}
       <div className="flex-1 flex flex-col">
         <div className="max-w-3xl mx-auto w-full px-6 py-6">
+          {/* Header */}
           <div className="flex items-center justify-between mb-6">
             <Link to="/" className="flex items-center gap-1 text-white/60 hover:text-white transition text-sm"><ChevronLeft className="w-5 h-5" /></Link>
             <h1 className="text-xl font-bold flex items-center gap-2"><Swords className="w-5 h-5 text-amber-400" />Desafios Online</h1>
             <div className="w-8" />
           </div>
 
+          {/* User Card */}
           <div className="bg-gradient-to-r from-amber-500/20 to-amber-600/10 rounded-2xl p-4 border border-amber-500/20 mb-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -149,6 +174,7 @@ export default function ChallengeLobbyPage() {
             </div>
           </div>
 
+          {/* Online Players */}
           {onlinePlayers.length > 0 && (
             <div className="mb-4 bg-green-500/10 rounded-xl p-3 border border-green-500/20">
               <div className="flex items-center gap-2 mb-2">
@@ -166,6 +192,7 @@ export default function ChallengeLobbyPage() {
             </div>
           )}
 
+          {/* Create Room */}
           <div className="mb-4">
             {showCreateForm ? (
               <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
@@ -189,6 +216,7 @@ export default function ChallengeLobbyPage() {
             )}
           </div>
 
+          {/* Join by Code */}
           <div className="mb-4">
             {showJoinCode ? (
               <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
@@ -212,6 +240,7 @@ export default function ChallengeLobbyPage() {
             )}
           </div>
 
+          {/* Export/Import */}
           <div className="flex gap-2 mb-6">
             <button onClick={handleImport} className="flex-1 py-2 bg-white/5 text-white/70 rounded-xl text-sm hover:bg-white/10 transition flex items-center justify-center gap-1.5">
               <Upload className="w-4 h-4" /> Importar Sala
@@ -223,6 +252,7 @@ export default function ChallengeLobbyPage() {
             )}
           </div>
 
+          {/* Tabs */}
           <div className="flex gap-2 mb-4 overflow-x-auto">
             <button onClick={() => setTab("public")} className={`flex-shrink-0 px-4 py-2 rounded-xl text-sm font-bold transition ${tab === "public" ? "bg-amber-500 text-indigo-950" : "bg-white/5 text-white/50 hover:bg-white/10"}`}>
               <Target className="w-4 h-4 inline mr-1" />Publicos ({publicChallenges.length})
@@ -235,6 +265,7 @@ export default function ChallengeLobbyPage() {
             </button>
           </div>
 
+          {/* PUBLIC ROOMS */}
           {tab === "public" && (
             <div className="space-y-3">
               {publicChallenges.length === 0 ? (
@@ -256,6 +287,7 @@ export default function ChallengeLobbyPage() {
             </div>
           )}
 
+          {/* PLAYERS + INCOMING */}
           {tab === "players" && (
             <div className="space-y-3">
               {onlinePlayers.length === 0 ? (
@@ -284,6 +316,7 @@ export default function ChallengeLobbyPage() {
                   ))}
                 </div>
               )}
+
               {incomingChallenges.length > 0 && (
                 <div className="mt-4 space-y-2">
                   <h3 className="text-sm font-bold text-green-400 flex items-center gap-1"><Swords className="w-4 h-4" />Te retaron</h3>
@@ -307,6 +340,7 @@ export default function ChallengeLobbyPage() {
             </div>
           )}
 
+          {/* MIS DESAFIOS */}
           {tab === "mine" && (
             <div className="space-y-4">
               {activeDuels.length > 0 && (
@@ -366,7 +400,8 @@ export default function ChallengeLobbyPage() {
         </div>
       </div>
 
-      <div className="w-72 border-l border-white/10 bg-indigo-900/20 flex-col hidden lg:flex">
+      {/* GLOBAL CHAT SIDEBAR */}
+      <div className="w-72 border-l border-white/10 bg-indigo-900/20 flex flex-col hidden lg:flex">
         <div className="p-3 border-b border-white/10 flex items-center gap-2">
           <MessageSquare className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-bold">Chat Global</span>
