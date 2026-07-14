@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { useState } from 'react';
-import { Play, Trophy, Settings, HelpCircle, Users, Zap, Swords, LogIn, LogOut, Shield, User, Lock, X, MessageCircle } from 'lucide-react';
+import { Play, Trophy, Settings, HelpCircle, Users, Zap, Swords, LogIn, LogOut, Shield, User, Lock, X, MessageCircle, UserPlus } from 'lucide-react';
 import { useSound } from '@/hooks/useSound';
 import { useNavigate } from 'react-router';
 import { AnimatePresence, motion as motion2 } from 'framer-motion';
@@ -119,11 +119,28 @@ export function MainMenu({ onPlay, onLeaderboard, onSettings, onTutorial, onLogo
         {/* Auth & Admin buttons */}
         <div className="mt-4 flex flex-wrap justify-center gap-2">
           {!user && (
-            <motion.button initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }}
-              onClick={() => handleClick(() => navigate('/login'))}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white/80 text-sm transition">
-              <LogIn size={16} /> Iniciar Sesion
-            </motion.button>
+            <>
+              <motion.button
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1.08 }}
+                onClick={() => handleClick(() => navigate('/register'))}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 text-sm transition font-medium"
+              >
+                <UserPlus size={16} />
+                Registrarse
+              </motion.button>
+              <motion.button
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1.1 }}
+                onClick={() => handleClick(() => navigate('/login'))}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white/80 text-sm transition"
+              >
+                <LogIn size={16} />
+                Iniciar Sesion
+              </motion.button>
+            </>
           )}
           {user && (
             <>
