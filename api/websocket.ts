@@ -1,12 +1,14 @@
 import { WebSocketServer, WebSocket } from "ws";
 
 interface WSMessage {
-  type: "join" | "leave" | "chat" | "ping" | "pong" | "presence";
+  type: "join" | "leave" | "chat" | "ping" | "pong" | "presence" | "roster" | "welcome";
   room?: string;
   senderId?: number;
   senderName?: string;
   content?: string;
   timestamp?: number;
+  users?: Array<{ id: number; name: string }>;
+  messages?: Array<{ senderId: number; senderName: string; content: string; timestamp: number }>;
 }
 
 interface ClientInfo {
@@ -30,6 +32,22 @@ function broadcast(room: string, message: WSMessage, exclude?: WebSocket) {
   }
 }
 
+// Lista de usuarios unicos actualmente en una sala
+default function _noop() {}
+function getRoomUsers(room: string): Array<{ id: number; name: string }> {
+  const seen = new Map<number, string>();
+  for (const [, info] of clients) {
+    if (info.rooms.has(room) && info.userId && info.ws.readyState === WebSocket.OPEN) {
+      seen.set(info.userId, info.userName || `Jugador #${info.userId}`);
+    }
+  }
+  return Array.from(seen, ([id, name]) => ({ id, name }));
+}
+
+function broadcastRoster(room: string) {
+  broadcast(room, { type: "roster", room, users: getRoomUsers(room), timestamp: Date.now() });
+}
+
 function addToHistory(room: string, msg: { senderId: number; senderName: string; content: string; timestamp: number }) {
   if (!roomHistory.has(room)) roomHistory.set(room, []);
   const history = roomHistory.get(room)!;
@@ -37,21 +55,19 @@ function addToHistory(room: string, msg: { senderId: number; senderName: string;
   if (history.length > MAX_HISTORY) history.shift();
 }
 
-export function startWebSocketServer(port: number = 3001) {
-  const wss = new WebSocketServer({ port });
+export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.0") {
+  const wss = new WebSocketServer({ port, host });
 
-  console.log(`[WebSocket] Server running on ws://localhost:${port}`);
+  console.log(`[WebSocket] Server running on ws://${host}:${port}`);
 
   const heartbeat = setInterval(() => {
     const now = Date.now();
     for (const [ws, info] of clients) {
       if (now - info.lastPing > 60000) {
+        // terminate() dispara "close" -> ahi se limpia y se anuncia la salida
         ws.terminate();
-        clients.delete(ws);
-      } else {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "ping" }));
-        }
+      } else if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping" }));
       }
     }
   }, 30000);
@@ -68,19 +84,31 @@ export function startWebSocketServer(port: number = 3001) {
         switch (msg.type) {
           case "join": {
             if (msg.room) {
+              const alreadyInRoom = info.rooms.has(msg.room);
               info.rooms.add(msg.room);
               info.userId = msg.senderId;
               info.userName = msg.senderName;
-              const history = roomHistory.get(msg.room) || [];
-              ws.send(JSON.stringify({ type: "history", room: msg.room, messages: history }));
-              broadcast(msg.room, {
-                type: "presence",
+
+              // Historial + lista actual para el que entra
+              ws.send(JSON.stringify({
+                type: "welcome",
                 room: msg.room,
-                senderId: msg.senderId,
-                senderName: msg.senderName,
-                content: "joined",
-                timestamp: Date.now(),
-              }, ws);
+                messages: roomHistory.get(msg.room) || [],
+                users: getRoomUsers(msg.room),
+              }));
+
+              if (!alreadyInRoom) {
+                broadcast(msg.room, {
+                  type: "presence",
+                  room: msg.room,
+                  senderId: msg.senderId,
+                  senderName: msg.senderName,
+                  content: "joined",
+                  timestamp: Date.now(),
+                }, ws);
+              }
+              // Lista actualizada para TODOS en la sala (incluye al nuevo)
+              broadcastRoster(msg.room);
             }
             break;
           }
@@ -95,6 +123,7 @@ export function startWebSocketServer(port: number = 3001) {
                 content: "left",
                 timestamp: Date.now(),
               }, ws);
+              broadcastRoster(msg.room);
             }
             break;
           }
@@ -114,7 +143,8 @@ export function startWebSocketServer(port: number = 3001) {
                 content: chatMsg.content,
                 timestamp: chatMsg.timestamp,
               });
-              broadcast(msg.room, chatMsg);
+              // No reenviar al emisor: el ya muestra su mensaje localmente
+              broadcast(msg.room, chatMsg, ws);
             }
             break;
           }
@@ -122,26 +152,27 @@ export function startWebSocketServer(port: number = 3001) {
             break;
           }
         }
-      } catch { /* */ }
+      } catch { /* mensaje invalido */ }
     });
 
-    ws.on("close", () => {
+    const handleDisconnect = () => {
+      if (!clients.has(ws)) return; // ya procesado
+      clients.delete(ws);
       for (const room of info.rooms) {
         broadcast(room, {
           type: "presence",
           room,
           senderId: info.userId,
           senderName: info.userName,
-          content: "disconnected",
+          content: "left",
           timestamp: Date.now(),
         });
+        broadcastRoster(room);
       }
-      clients.delete(ws);
-    });
+    };
 
-    ws.on("error", () => {
-      clients.delete(ws);
-    });
+    ws.on("close", handleDisconnect);
+    ws.on("error", handleDisconnect);
   });
 
   wss.on("close", () => {

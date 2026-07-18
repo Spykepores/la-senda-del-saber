@@ -14,8 +14,8 @@ const EMOJIS = ["😀", "😂", "😍", "🙏", "✝️", "📖", "❤️", "�
 
 export default function ChatPage() {
   const { user, isLoading: authLoading } = useAuth();
-  const { messages: globalMessages, send: sendGlobal, connected: wsConnected } = useWebSocketChat("global");
-  const onlinePlayers = useOnlinePlayers(user?.id || 0, user?.name || "Jugador");
+  const { messages: globalMessages, send: sendGlobal, connected: wsConnected, onlineUsers: wsOnlineUsers } = useWebSocketChat("global", user?.id || 0, user?.name || "Jugador");
+  const localPlayers = useOnlinePlayers(user?.id || 0, user?.name || "Jugador");
 
   const [chatInput, setChatInput] = useState("");
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -51,6 +51,12 @@ export default function ChatPage() {
 
   const myId = user.id;
   const myName = user.name || `Jugador #${myId}`;
+
+  // Presencia: si el WebSocket esta conectado, usar la lista real del servidor
+  // (funciona entre navegadores y dispositivos). Si no, fallback localStorage.
+  const onlinePlayers = wsConnected
+    ? wsOnlineUsers.filter((u: any) => u.id !== myId)
+    : localPlayers;
 
   const handleSend = () => {
     if (!chatInput.trim()) return;
@@ -255,14 +261,16 @@ export default function ChatPage() {
               <div className="text-center py-6 text-white/30">
                 <Users className="w-8 h-8 mx-auto mb-2 opacity-30" />
                 <p className="text-xs">No hay otros jugadores</p>
-                <p className="text-[10px]">Abre otra pestana para verlos</p>
+                <p className="text-[10px]">Cuando alguien se conecte aparecera aqui</p>
               </div>
             )}
           </div>
 
           <div className="p-3 border-t border-white/10">
             <p className="text-[10px] text-white/30 text-center">
-              Abre el juego en otra pestana del navegador para chatear entre cuentas
+              {wsConnected
+                ? "Conectado: puedes chatear con jugadores en otros navegadores y dispositivos"
+                : "Modo offline: inicia el servidor con npm run dev:all para chat en linea"}
             </p>
           </div>
         </div>

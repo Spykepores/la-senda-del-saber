@@ -29,6 +29,11 @@ export interface ChatMessage {
   channel: string;
 }
 
+export interface OnlineUser {
+  id: number;
+  name: string;
+}
+
 // localStorage fallback keys
 const LS_MESSAGES = "senda_chat_messages";
 const MAX_MESSAGES = 200;
@@ -45,19 +50,27 @@ function lsSaveMessages(msgs: ChatMessage[]) {
   localStorage.setItem(LS_MESSAGES, JSON.stringify(msgs.slice(-MAX_MESSAGES)));
 }
 
-// WebSocket config - auto-detect if running with backend
-function getWsUrl(): string | null {
-  const isLocalhost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-  if (!isLocalhost) return null;
+// WebSocket config
+// 1) VITE_WS_URL tiene prioridad (produccion, ej: wss://mi-servidor.com)
+// 2) Mismo hostname de la pagina en puerto 3001: funciona en localhost Y en red local
+//    (si un amigo abre http://192.168.1.10:5173, se conecta a ws://192.168.1.10:3001)
+function getWsUrl(): string {
+  const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
+  if (envUrl) return envUrl;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//localhost:3001`;
+  return `${protocol}//${window.location.hostname}:3001`;
 }
 
-export function useWebSocketChat(channel: string) {
+function makeId(ts: number): string {
+  return `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function useWebSocketChat(channel: string, userId: number = 0, userName: string = "") {
   const [messages, setMessages] = useState<ChatMessage[]>(() =>
     lsLoadMessages().filter((m) => m.channel === channel)
   );
   const [connected, setConnected] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const channelRef = useRef(channel);
@@ -67,7 +80,21 @@ export function useWebSocketChat(channel: string) {
     channelRef.current = channel;
   }, [channel]);
 
-  // localStorage cross-tab sync
+  // Registrar el usuario actual para presencia (join inmediato si ya hay conexion)
+  useEffect(() => {
+    if (!userId) return;
+    userRef.current = { id: userId, name: userName || `Jugador #${userId}` };
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "join",
+        room: channelRef.current,
+        senderId: userRef.current.id,
+        senderName: userRef.current.name,
+      }));
+    }
+  }, [userId, userName]);
+
+  // localStorage cross-tab sync (fallback offline: solo pestanas del mismo navegador)
   useEffect(() => {
     const handler = (e: StorageEvent) => {
       if (e.key === LS_MESSAGES) {
@@ -79,18 +106,9 @@ export function useWebSocketChat(channel: string) {
     return () => window.removeEventListener("storage", handler);
   }, []);
 
-  // WebSocket connection
+  // WebSocket connection (con reconexion automatica)
   useEffect(() => {
     const wsUrl = getWsUrl();
-    if (!wsUrl) {
-      setConnected(false);
-      const interval = setInterval(() => {
-        const all = lsLoadMessages();
-        setMessages(all.filter((m) => m.channel === channelRef.current));
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-
     let ws: WebSocket | null = null;
     let closed = false;
 
@@ -115,22 +133,30 @@ export function useWebSocketChat(channel: string) {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+
             if (data.type === "chat" && data.room === channelRef.current) {
               const msg: ChatMessage = {
-                id: `${data.timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+                id: makeId(data.timestamp),
                 senderId: data.senderId,
                 senderName: data.senderName,
                 content: data.content,
                 timestamp: data.timestamp,
                 channel: data.room,
               };
-              setMessages((prev) => [...prev, msg]);
+              // Dedupe: no agregar si ya existe (proteccion contra eco propio)
+              setMessages((prev) => {
+                if (prev.some((m) => m.senderId === msg.senderId && m.timestamp === msg.timestamp)) return prev;
+                return [...prev, msg];
+              });
               const all = lsLoadMessages();
-              all.push(msg);
-              lsSaveMessages(all);
-            } else if (data.type === "history" && data.room === channelRef.current) {
+              if (!all.some((m) => m.senderId === msg.senderId && m.timestamp === msg.timestamp)) {
+                all.push(msg);
+                lsSaveMessages(all);
+              }
+            } else if ((data.type === "welcome" || data.type === "history") && data.room === channelRef.current) {
+              // Historial del servidor + lista de usuarios actuales
               const historyMsgs: ChatMessage[] = (data.messages || []).map((m: any) => ({
-                id: `${m.timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+                id: makeId(m.timestamp),
                 senderId: m.senderId,
                 senderName: m.senderName,
                 content: m.content,
@@ -139,6 +165,10 @@ export function useWebSocketChat(channel: string) {
               }));
               setMessages(historyMsgs);
               lsSaveMessages([...lsLoadMessages().filter((m) => m.channel !== data.room), ...historyMsgs]);
+              if (Array.isArray(data.users)) setOnlineUsers(data.users);
+            } else if (data.type === "roster" && data.room === channelRef.current) {
+              // Lista actualizada de usuarios en la sala
+              setOnlineUsers(Array.isArray(data.users) ? data.users : []);
             } else if (data.type === "ping") {
               ws?.send(JSON.stringify({ type: "pong" }));
             }
@@ -147,6 +177,7 @@ export function useWebSocketChat(channel: string) {
 
         ws.onclose = () => {
           setConnected(false);
+          setOnlineUsers([]);
           wsRef.current = null;
           if (!closed && !reconnectTimer.current) {
             reconnectTimer.current = setTimeout(() => {
@@ -165,12 +196,25 @@ export function useWebSocketChat(channel: string) {
     connect();
     return () => {
       closed = true;
-      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
       ws?.close();
     };
   }, []);
 
-  // Join channel when it changes
+  // Fallback offline: polling de localStorage SOLO cuando no hay WebSocket
+  useEffect(() => {
+    if (connected) return;
+    const interval = setInterval(() => {
+      const all = lsLoadMessages();
+      setMessages(all.filter((m) => m.channel === channelRef.current));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [connected]);
+
+  // Join al cambiar de canal
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && userRef.current) {
       wsRef.current.send(JSON.stringify({
@@ -187,10 +231,12 @@ export function useWebSocketChat(channel: string) {
       const trimmed = content.trim();
       if (!trimmed) return false;
       const censored = censorText(trimmed);
-      userRef.current = { id: senderId, name: senderName };
+      if (!userRef.current && senderId) {
+        userRef.current = { id: senderId, name: senderName || "Anonimo" };
+      }
 
       const msg: ChatMessage = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: makeId(Date.now()),
         senderId,
         senderName: senderName || "Anonimo",
         content: censored,
@@ -220,5 +266,5 @@ export function useWebSocketChat(channel: string) {
     []
   );
 
-  return { messages, send: sendMessage, connected };
+  return { messages, send: sendMessage, connected, onlineUsers };
 }
