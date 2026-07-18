@@ -6,6 +6,8 @@
 export const SEALS_TO_BREAK = 2;
 export const CATEGORIES = ["genealogy", "parables", "stories", "prophecy", "doctrine", "characters", "books"];
 
+export type GamePhase = "dice_roll" | "waiting" | "roulette" | "question" | "result" | "finished" | "forfeit";
+
 export interface DuelStateDTO {
   id: number;
   challengerId: number;
@@ -22,6 +24,9 @@ export interface DuelStateDTO {
   currentCategory: string | null;
   currentQuestionId: number | null;
   currentTurnUserId: number | null;
+  phase: GamePhase;
+  challengerDice: number | null;
+  opponentDice: number | null;
   roomCode: string | null;
   challengerName?: string;
   opponentName?: string;
@@ -30,8 +35,7 @@ export interface DuelStateDTO {
 export type DuelAction =
   | { kind: "roll_dice"; playerId: number; diceValue: number }
   | { kind: "start_turn"; playerId: number }
-  | { kind: "roulette_result"; playerId: number; category: string }
-  | { kind: "submit_answer"; playerId: number; questionId: number; selectedOption: number; correct: boolean }
+  | { kind: "submit_answer"; playerId: number; questionId: number; selectedOption: number }
   | { kind: "forfeit"; playerId: number }
   | { kind: "set_turn"; playerId: number };
 
@@ -73,6 +77,9 @@ export function buildDuelStateDTO(row: any, challengerName?: string, opponentNam
     currentCategory: row.currentCategory || null,
     currentQuestionId: row.currentQuestionId || null,
     currentTurnUserId: row.currentTurnUserId || null,
+    phase: row.phase || "dice_roll",
+    challengerDice: row.challengerDice || null,
+    opponentDice: row.opponentDice || null,
     roomCode: row.roomCode || null,
     challengerName,
     opponentName,
@@ -92,6 +99,64 @@ export function isChallenger(state: DuelStateDTO, playerId: number): boolean {
 // ---- Obtener sellos de un jugador ----
 export function getPlayerSeals(state: DuelStateDTO, playerId: number): Record<string, number> {
   return isChallenger(state, playerId) ? state.challengerSeals : state.opponentSeals;
+}
+
+// ---- Roll dice ----
+export function rollDice(): number {
+  return Math.floor(Math.random() * 6) + 1;
+}
+
+// ---- Validar que un jugador puede actuar en este desafio ----
+export function canPlayerAct(state: DuelStateDTO, playerId: number): boolean {
+  if (state.status !== "active") return false;
+  return state.challengerId === playerId || state.opponentId === playerId;
+}
+
+// ---- RESOLVER DADOS: guarda dado, decide turno si ambos tiraron ----
+export function resolveDiceRoll(state: DuelStateDTO, playerId: number, diceValue: number): DuelStateDTO {
+  const newState = { ...state };
+  const isChal = isChallenger(newState, playerId);
+
+  if (isChal) {
+    newState.challengerDice = diceValue;
+  } else {
+    newState.opponentDice = diceValue;
+  }
+
+  // Si ambos ya tiraron, comparar
+  if (newState.challengerDice !== null && newState.opponentDice !== null) {
+    if (newState.challengerDice > newState.opponentDice) {
+      newState.currentTurnUserId = newState.challengerId;
+      newState.phase = "waiting";
+    } else if (newState.opponentDice > newState.challengerDice) {
+      newState.currentTurnUserId = newState.opponentId;
+      newState.phase = "waiting";
+    } else {
+      // Empate: limpiar dados, mantener dice_roll
+      newState.challengerDice = null;
+      newState.opponentDice = null;
+      newState.phase = "dice_roll";
+    }
+  }
+  // Si falta uno, seguir en dice_roll
+
+  return newState;
+}
+
+// ---- START ROULETTE: sortea categoria en servidor ----
+export function startRoulette(state: DuelStateDTO, _playerId: number): DuelStateDTO {
+  const newState = { ...state };
+  const seals = getPlayerSeals(newState, newState.currentTurnUserId || _playerId);
+
+  // Solo elegir categorias que el jugador no ha completado
+  const avail = CATEGORIES.filter((cat) => (seals[cat] || 0) < SEALS_TO_BREAK);
+  const pool = avail.length > 0 ? avail : CATEGORIES;
+  const category = pool[Math.floor(Math.random() * pool.length)];
+
+  newState.currentCategory = category;
+  newState.phase = "question";
+
+  return newState;
 }
 
 // ---- Procesar respuesta correcta (retorna nuevo estado y si gano) ----
@@ -121,9 +186,12 @@ export function processCorrectAnswer(
   if (allSealsBroken(seals)) {
     newState.status = "completed";
     newState.winnerId = playerId;
+    newState.phase = "finished";
     return { state: newState, won: true };
   }
 
+  // No gano aun: fase "result" (tiene otra pregunta del mismo sello o pasa)
+  newState.phase = "result";
   return { state: newState, won: false };
 }
 
@@ -140,6 +208,7 @@ export function processWrongAnswer(state: DuelStateDTO, playerId: number): DuelS
 
   // Switch turn
   newState.currentTurnUserId = getOtherPlayerId(newState, playerId);
+  newState.phase = "waiting";
   return newState;
 }
 
@@ -149,50 +218,32 @@ export function processForfeit(state: DuelStateDTO, playerId: number): DuelState
     ...state,
     status: "completed",
     winnerId: getOtherPlayerId(state, playerId),
+    phase: "forfeit",
   };
 }
 
-// ---- Determinar quien empieza por dados ----
-export function determineFirstTurn(challengerDice: number, opponentDice: number): { firstTurnId: "challenger" | "opponent" | "tie"; challengerDice: number; opponentDice: number } {
-  if (challengerDice > opponentDice) return { firstTurnId: "challenger", challengerDice, opponentDice };
-  if (opponentDice > challengerDice) return { firstTurnId: "opponent", challengerDice, opponentDice };
-  return { firstTurnId: "tie", challengerDice, opponentDice };
-}
-
-// ---- Roll dice ----
-export function rollDice(): number {
-  return Math.floor(Math.random() * 6) + 1;
-}
-
-// ---- Validar que un jugador puede actuar en este desafio ----
-export function canPlayerAct(state: DuelStateDTO, playerId: number): boolean {
-  if (state.status !== "active") return false;
-  return state.challengerId === playerId || state.opponentId === playerId;
-}
-
 // ---- Obtener updates para DB desde estado modificado ----
-export function getDbUpdates(state: DuelStateDTO, playerId: number): Record<string, any> {
-  const isChal = isChallenger(state, playerId);
-  const updates: Record<string, any> = {};
+export function getDbUpdates(state: DuelStateDTO): Record<string, any> {
+  const updates: Record<string, any> = {
+    challengerSeals: JSON.stringify(state.challengerSeals),
+    opponentSeals: JSON.stringify(state.opponentSeals),
+    challengerStreak: state.challengerStreak,
+    opponentStreak: state.opponentStreak,
+    challengerScore: state.challengerScore,
+    opponentScore: state.opponentScore,
+    currentRound: state.currentRound,
+    currentCategory: state.currentCategory,
+    currentTurnUserId: state.currentTurnUserId,
+    currentQuestionId: state.currentQuestionId,
+    status: state.status,
+    phase: state.phase,
+    challengerDice: state.challengerDice,
+    opponentDice: state.opponentDice,
+  };
 
-  if (isChal) {
-    updates.challengerSeals = JSON.stringify(state.challengerSeals);
-    updates.challengerStreak = state.challengerStreak;
-    updates.challengerScore = state.challengerScore;
-  } else {
-    updates.opponentSeals = JSON.stringify(state.opponentSeals);
-    updates.opponentStreak = state.opponentStreak;
-    updates.opponentScore = state.opponentScore;
-  }
-
-  if (state.status === "completed") {
-    updates.status = "completed";
+  if (state.winnerId !== null) {
     updates.winnerId = state.winnerId;
     updates.endedAt = new Date();
-  }
-
-  if (state.currentTurnUserId !== null) {
-    updates.currentTurnUserId = state.currentTurnUserId;
   }
 
   return updates;

@@ -11,18 +11,13 @@ import {
   type DuelStateDTO,
   type DuelAction,
   buildDuelStateDTO,
-  parseSeals,
-  countBrokenSeals,
-  allSealsBroken,
-  getOtherPlayerId,
-  isChallenger,
-  getPlayerSeals,
+  canPlayerAct,
+  resolveDiceRoll,
+  startRoulette,
   processCorrectAnswer,
   processWrongAnswer,
   processForfeit,
-  canPlayerAct,
-  rollDice,
-  SEALS_TO_BREAK,
+  getDbUpdates,
 } from "./lib/duel-engine";
 
 export interface GameActionResult {
@@ -48,27 +43,7 @@ async function loadState(challengeId: number): Promise<DuelStateDTO | null> {
 // ---- Guardar estado a DB ----
 async function saveState(challengeId: number, state: DuelStateDTO): Promise<void> {
   const db = getDb();
-  const isChal = (pid: number) => state.challengerId === pid;
-
-  const update: Record<string, any> = {
-    challengerSeals: JSON.stringify(state.challengerSeals),
-    opponentSeals: JSON.stringify(state.opponentSeals),
-    challengerStreak: state.challengerStreak,
-    opponentStreak: state.opponentStreak,
-    challengerScore: state.challengerScore,
-    opponentScore: state.opponentScore,
-    currentRound: state.currentRound,
-    currentCategory: state.currentCategory,
-    currentTurnUserId: state.currentTurnUserId,
-    status: state.status,
-  };
-
-  if (state.winnerId !== null) {
-    update.winnerId = state.winnerId;
-    update.endedAt = new Date();
-  }
-
-  await db.update(challenges).set(update).where(eq(challenges.id, challengeId));
+  await db.update(challenges).set(getDbUpdates(state)).where(eq(challenges.id, challengeId));
 }
 
 // ---- Aplicar accion ----
@@ -86,43 +61,58 @@ export async function applyGameAction(
     return { state, error: "No puedes actuar en este desafio", broadcast: false };
   }
 
+  // Validate it's the player's turn for actions that require it
+  if (state.currentTurnUserId && state.currentTurnUserId !== playerId) {
+    if (action.kind === "start_turn" || action.kind === "submit_answer") {
+      return { state, error: "No es tu turno", broadcast: false };
+    }
+  }
+
+  // Validate phase for the action
+  if (action.kind === "roll_dice" && state.phase !== "dice_roll") {
+    return { state, error: "La fase de dados ya termino", broadcast: false };
+  }
+  if (action.kind === "start_turn" && state.phase !== "waiting") {
+    return { state, error: "No puedes iniciar turno ahora", broadcast: false };
+  }
+  if (action.kind === "submit_answer" && state.phase !== "question") {
+    return { state, error: "No hay pregunta activa", broadcast: false };
+  }
+
   switch (action.kind) {
     case "roll_dice": {
-      const diceValue = action.diceValue || rollDice();
-      const newState = { ...state };
-
-      // Store dice value on the player
-      if (isChallenger(newState, playerId)) {
-        (newState as any).challengerDice = diceValue;
-      } else {
-        (newState as any).opponentDice = diceValue;
-      }
-
+      const newState = resolveDiceRoll(state, playerId, action.diceValue || Math.floor(Math.random() * 6) + 1);
       await saveState(challengeId, newState);
       return { state: newState, broadcast: true };
     }
 
     case "start_turn": {
-      // Just confirmation that player is starting their turn
-      return { state, broadcast: false };
-    }
-
-    case "roulette_result": {
-      // Set the current category from the roulette spin
-      const newState = { ...state, currentCategory: action.category || "doctrine" };
+      // Server decides the category (roulette)
+      const newState = startRoulette(state, playerId);
       await saveState(challengeId, newState);
       return { state: newState, broadcast: true };
     }
 
     case "submit_answer": {
-      const correct = action.correct ?? false;
+      // VALIDATE ANSWER SERVER-SIDE: load question from DB, compare
+      const db = getDb();
+      const [question] = await db.select().from(questions).where(eq(questions.id, action.questionId)).limit(1);
+
+      if (!question) {
+        return { state, error: "Pregunta no encontrada", broadcast: false };
+      }
+
+      const correct = question.correctAnswer === action.selectedOption;
+
+      // Track current question as used
+      const s = { ...state, currentQuestionId: action.questionId };
 
       if (correct) {
-        const { state: newState, won } = processCorrectAnswer(state, playerId);
+        const { state: newState, won } = processCorrectAnswer(s, playerId);
         await saveState(challengeId, newState);
         return { state: newState, broadcast: true };
       } else {
-        const newState = processWrongAnswer(state, playerId);
+        const newState = processWrongAnswer(s, playerId);
         await saveState(challengeId, newState);
         return { state: newState, broadcast: true };
       }
@@ -145,34 +135,7 @@ export async function applyGameAction(
   }
 }
 
-// ---- Obtener pregunta para una categoria ----
-export async function getQuestionForCategory(
-  category: string,
-  excludeQuestionId?: number
-): Promise<{ id: number; question: string; options: string[]; correctAnswer: number; explanation: string } | null> {
-  const db = getDb();
-  const { and, eq, ne } = await import("drizzle-orm");
-
-  const pool = await db
-    .select()
-    .from(questions)
-    .where(and(eq(questions.category, category as any), eq(questions.isActive, true), ne(questions.id, excludeQuestionId || 0)));
-
-  if (pool.length === 0) {
-    const fallback = await db
-      .select()
-      .from(questions)
-      .where(and(eq(questions.category, category as any), eq(questions.isActive, true)));
-    if (fallback.length === 0) return null;
-    const q = fallback[Math.floor(Math.random() * fallback.length)];
-    return { id: q.id, question: q.question, options: [q.option1, q.option2, q.option3, q.option4], correctAnswer: q.correctAnswer, explanation: q.explanation || "" };
-  }
-
-  const q = pool[Math.floor(Math.random() * pool.length)];
-  return { id: q.id, question: q.question, options: [q.option1, q.option2, q.option3, q.option4], correctAnswer: q.correctAnswer, explanation: q.explanation || "" };
-}
-
-// ---- Obtener estado para broadcast (incluye pregunta actual) ----
+// ---- Obtener estado para broadcast ----
 export async function getFullGameState(challengeId: number): Promise<DuelStateDTO | null> {
   return loadState(challengeId);
 }
