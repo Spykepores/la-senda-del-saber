@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: la-senda-del-saber
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+    healthCheckPath: /api/trpc/ping
