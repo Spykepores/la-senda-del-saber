@@ -18,6 +18,8 @@ export type WSEventType =
   | "game-start" | "next-turn" | "spin-wheel" | "wheel-result"
   | "question" | "answer" | "correct" | "wrong" | "score-update"
   | "timer" | "game-over" | "dice"
+  // Duelo (desafio 1v1)
+  | "game_action" | "game_state" | "game_error"
   // Estado
   | "game-state" | "presence"
   // Heartbeat
@@ -43,6 +45,17 @@ export interface WSMessage {
   diceValue?: number;
   correct?: boolean;
   ready?: boolean;
+  // Duelo
+  action?: {
+    kind: "roll_dice" | "start_turn" | "roulette_result" | "submit_answer" | "forfeit" | "set_turn";
+    playerId?: number;
+    diceValue?: number;
+    category?: string;
+    questionId?: number;
+    selectedOption?: number;
+    correct?: boolean;
+  };
+  gameError?: string;
   category?: string;
   message?: ChatMessageData;
   users?: PresenceUser[];
