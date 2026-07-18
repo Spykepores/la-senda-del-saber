@@ -33,3 +33,11 @@ serve({
 });
 
 console.log(`Server running at http://localhost:${port}`);
+
+// Start WebSocket server on port 3001
+try {
+  const { startWebSocketServer } = await import("./websocket");
+  startWebSocketServer(3001);
+} catch (e) {
+  console.warn("[WebSocket] Could not start:", e);
+}
