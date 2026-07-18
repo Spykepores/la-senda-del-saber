@@ -33,7 +33,6 @@ function broadcast(room: string, message: WSMessage, exclude?: WebSocket) {
 }
 
 // Lista de usuarios unicos actualmente en una sala
-default function _noop() {}
 function getRoomUsers(room: string): Array<{ id: number; name: string }> {
   const seen = new Map<number, string>();
   for (const [, info] of clients) {
