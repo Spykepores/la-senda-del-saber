@@ -3,15 +3,17 @@ import { useAuth } from "@/hooks/useAuth";
 import { Link } from "react-router";
 import {
   useCreateDuel, useJoinDuel, useAcceptDuel, useRejectDuel,
-  useOnlinePlayers, useGlobalChat,
+  useOnlinePlayers,
   usePublicChallenges, useMyChallenges,
   exportChallengeState, importChallengeState,
 } from "@/hooks/useDuel";
+import { useWebSocketChat } from "@/hooks/useWebSocketChat";
 import {
-  Swords, ChevronLeft, Zap, Users, Plus, ArrowRight, User, Target,
-  Hourglass, Check, Send, MessageSquare, X, Upload, Download, Hash
+  Swords, Zap, Users, Plus, ArrowRight, User, Target,
+  Hourglass, Check, Send, MessageSquare, X, Upload, Download, Hash, Wifi, WifiOff
 } from "lucide-react";
 import { getChallengeByCode } from "@/lib/sync";
+import PageHeader from "@/components/PageHeader";
 
 export default function ChallengeLobbyPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -37,8 +39,8 @@ export default function ChallengeLobbyPage() {
   const publicChallenges = usePublicChallenges(user?.id || 0);
   const myChallenges = useMyChallenges(user?.id || 0);
 
-  // Global chat
-  const { messages: globalMessages, send: sendGlobal } = useGlobalChat();
+  // Global chat via WebSocket
+  const { messages: globalMessages, send: sendGlobal, connected: wsConnected } = useWebSocketChat("global");
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -157,11 +159,7 @@ export default function ChallengeLobbyPage() {
       <div className="flex-1 flex flex-col">
         <div className="max-w-3xl mx-auto w-full px-6 py-6">
           {/* Header */}
-          <div className="flex items-center justify-between mb-6">
-            <Link to="/" className="flex items-center gap-1 text-white/60 hover:text-white transition text-sm"><ChevronLeft className="w-5 h-5" /></Link>
-            <h1 className="text-xl font-bold flex items-center gap-2"><Swords className="w-5 h-5 text-amber-400" />Desafios Online</h1>
-            <div className="w-8" />
-          </div>
+          <PageHeader title="Desafios Online" />
 
           {/* User Card */}
           <div className="bg-gradient-to-r from-amber-500/20 to-amber-600/10 rounded-2xl p-4 border border-amber-500/20 mb-6">
@@ -405,7 +403,10 @@ export default function ChallengeLobbyPage() {
         <div className="p-3 border-b border-white/10 flex items-center gap-2">
           <MessageSquare className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-bold">Chat Global</span>
-          <span className="text-[10px] text-white/40 ml-auto">{globalMessages.length} msgs</span>
+          <span className="text-[10px] text-white/40 ml-auto flex items-center gap-1">
+            {wsConnected ? <Wifi className="w-2.5 h-2.5 text-blue-400" /> : <WifiOff className="w-2.5 h-2.5 text-yellow-400" />}
+            {globalMessages.length} msgs
+          </span>
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
           {globalMessages.length === 0 && (
