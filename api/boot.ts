@@ -1,43 +1,44 @@
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
-import { trpcServer } from "@trpc/server/adapters/fetch";
+import { bodyLimit } from "hono/body-limit";
+import type { HttpBindings } from "@hono/node-server";
+import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { appRouter } from "./router";
 import { createContext } from "./context";
 import { env } from "./lib/env";
+import { createOAuthCallbackHandler } from "./kimi/auth";
+import { Paths } from "@contracts/constants";
 
-const app = new Hono();
+const app = new Hono<{ Bindings: HttpBindings }>();
 
-// CORS
-app.use("*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", "*");
-  c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (c.req.method === "OPTIONS") return c.text("", 204);
-  await next();
+app.use(bodyLimit({ maxSize: 50 * 1024 * 1024 }));
+app.get(Paths.oauthCallback, createOAuthCallbackHandler());
+app.use("/api/trpc/*", async (c) => {
+  return fetchRequestHandler({
+    endpoint: "/api/trpc",
+    req: c.req.raw,
+    router: appRouter,
+    createContext,
+  });
 });
+app.all("/api/*", (c) => c.json({ error: "Not Found" }, 404));
 
-// Health check
-app.get("/health", (c) => c.json({ status: "ok" }));
+export default app;
 
-// tRPC
-app.use("/trpc/*", trpcServer({
-  router: appRouter,
-  createContext,
-}));
-
-const port = Number(process.env.PORT) || 3000;
-
-serve({
-  fetch: app.fetch,
-  port,
-});
-
-console.log(`Server running at http://localhost:${port}`);
-
-// Start WebSocket server on port 3001
+// Start WebSocket game server (modular architecture)
 try {
-  const { startWebSocketServer } = await import("./websocket");
+  const { startWebSocketServer } = await import("./websocket/server");
   startWebSocketServer(3001);
 } catch (e) {
   console.warn("[WebSocket] Could not start:", e);
+}
+
+if (env.isProduction) {
+  const { serve } = await import("@hono/node-server");
+  const { serveStaticFiles } = await import("./lib/vite");
+  serveStaticFiles(app);
+
+  const port = parseInt(process.env.PORT || "3000");
+  serve({ fetch: app.fetch, port }, () => {
+    console.log(`Server running on http://localhost:${port}/`);
+  });
 }

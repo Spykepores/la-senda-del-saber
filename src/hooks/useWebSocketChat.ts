@@ -1,19 +1,44 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+// ============================================================
+// TIPOS
+// ============================================================
 export interface ChatMessage {
   id: string;
   senderId: number;
   senderName: string;
   content: string;
   timestamp: number;
-  channel: string;
 }
 
 export interface PresenceUser {
   id: number;
   name: string;
+  connected: boolean;
 }
 
+export interface WSGameState {
+  roomId: string;
+  turn: number;
+  round: number;
+  phase: string;
+  currentCategory?: string;
+  wheelAngle?: number;
+  wheelResult?: string;
+  timer: number;
+  timerActive: boolean;
+  winnerId?: number | null;
+  forfeitBy?: number;
+  winReason?: string;
+  lastAnswerCorrect?: boolean;
+  diceRolled: boolean;
+  started: boolean;
+  players?: any[];
+}
+
+// ============================================================
+// PROFANITY FILTER
+// ============================================================
 const BAD_WORDS = [
   "puta", "puto", "mierda", "chinga", "chingar", "pendejo", "pendeja", "cabron",
   "joder", "maricon", "mamon", "culero", "estupido", "estupida", "idiota", "imbecil",
@@ -33,8 +58,11 @@ function censorText(text: string): string {
   return censored;
 }
 
-const LS_MESSAGES = "senda_chat_messages";
-const LS_USERS = "senda_chat_users";
+// ============================================================
+// LOCALSTORAGE FALLBACK
+// ============================================================
+const LS_MESSAGES = "senda_chat_messages_v2";
+const LS_USERS = "senda_chat_users_v2";
 const MAX_MESSAGES = 200;
 
 function lsLoadMessages(): ChatMessage[] {
@@ -52,9 +80,10 @@ function lsSaveUsers(users: PresenceUser[]) {
   localStorage.setItem(LS_USERS, JSON.stringify(users));
 }
 
+// ============================================================
+// WEBSOCKET URL
+// ============================================================
 function getWsUrl(): string {
-  const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
-  if (envUrl) return envUrl;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.hostname}:3001`;
 }
@@ -63,13 +92,14 @@ function makeId(ts: number): string {
   return `${ts}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// ============================================================
+// HOOK
+// ============================================================
 export function useWebSocketChat(channel: string, userId: number = 0, userName: string = "") {
-  const [messages, setMessages] = useState<ChatMessage[]>(() =>
-    lsLoadMessages().filter((m) => m.channel === channel)
-  );
+  const [messages, setMessages] = useState<ChatMessage[]>(() => lsLoadMessages());
   const [connected, setConnected] = useState(false);
-  const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>([]);
-  const [gameState, setGameState] = useState<any>(null);
+  const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>(() => lsLoadUsers());
+  const [gameState, setGameState] = useState<WSGameState | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const channelRef = useRef(channel);
@@ -77,29 +107,24 @@ export function useWebSocketChat(channel: string, userId: number = 0, userName: 
 
   useEffect(() => { channelRef.current = channel; }, [channel]);
 
+  // Actualizar userRef cuando cambian props
   useEffect(() => {
-    if (!userId) return;
-    userRef.current = { id: userId, name: userName || `Jugador #${userId}` };
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: "join", room: channelRef.current,
-        senderId: userRef.current.id, senderName: userRef.current.name,
-      }));
+    if (userId) {
+      userRef.current = { id: userId, name: userName || `Jugador #${userId}` };
     }
   }, [userId, userName]);
 
+  // localStorage cross-tab sync
   useEffect(() => {
     const handler = (e: StorageEvent) => {
-      if (e.key === LS_MESSAGES) {
-        const all = lsLoadMessages();
-        setMessages(all.filter((m) => m.channel === channelRef.current));
-      }
-      if (e.key === LS_USERS) setUsers(lsLoadUsers());
+      if (e.key === LS_MESSAGES) setMessages(lsLoadMessages());
+      if (e.key === LS_USERS) setOnlineUsers(lsLoadUsers());
     };
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
   }, []);
 
+  // WebSocket connection
   useEffect(() => {
     const wsUrl = getWsUrl();
     let ws: WebSocket | null = null;
@@ -113,10 +138,13 @@ export function useWebSocketChat(channel: string, userId: number = 0, userName: 
 
         ws.onopen = () => {
           setConnected(true);
+          // Join room
           if (userRef.current) {
             ws!.send(JSON.stringify({
-              type: "join", room: channelRef.current,
-              senderId: userRef.current.id, senderName: userRef.current.name,
+              type: "join-room",
+              roomId: channelRef.current,
+              senderId: userRef.current.id,
+              senderName: userRef.current.name,
             }));
           }
         };
@@ -125,60 +153,90 @@ export function useWebSocketChat(channel: string, userId: number = 0, userName: 
           try {
             const data = JSON.parse(event.data);
             switch (data.type) {
-              case "chat": {
-                if (data.room === channelRef.current) {
-                  const msg: ChatMessage = {
-                    id: makeId(data.timestamp),
-                    senderId: data.senderId, senderName: data.senderName,
-                    content: data.content, timestamp: data.timestamp, channel: data.room,
-                  };
+              // ---- CHAT ----
+              case "chat-message": {
+                if (data.message) {
+                  const msg: ChatMessage = data.message;
                   setMessages((prev) => {
-                    if (prev.some((m) => m.senderId === msg.senderId && m.timestamp === msg.timestamp)) return prev;
+                    if (prev.some((m) => m.id === msg.id)) return prev;
                     return [...prev, msg];
                   });
+                  // Persist
                   const all = lsLoadMessages();
-                  if (!all.some((m) => m.senderId === msg.senderId && m.timestamp === msg.timestamp)) {
-                    all.push(msg); lsSaveMessages(all);
-                  }
+                  if (!all.some((m) => m.id === msg.id)) { all.push(msg); lsSaveMessages(all); }
                 }
                 break;
               }
-              case "welcome":
-              case "history": {
-                if (data.room === channelRef.current) {
-                  const historyMsgs: ChatMessage[] = (data.messages || []).map((m: any) => ({
-                    id: makeId(m.timestamp),
-                    senderId: m.senderId, senderName: m.senderName,
-                    content: m.content, timestamp: m.timestamp, channel: data.room,
+
+              // ---- HISTORY ----
+              case "game-state": {
+                if (data.history) {
+                  const historyMsgs: ChatMessage[] = data.history.map((m: any) => ({
+                    id: m.id || makeId(m.timestamp),
+                    senderId: m.senderId,
+                    senderName: m.senderName,
+                    content: m.content,
+                    timestamp: m.timestamp,
                   }));
                   setMessages(historyMsgs);
-                  lsSaveMessages([...lsLoadMessages().filter((m) => m.channel !== data.room), ...historyMsgs]);
-                  if (Array.isArray(data.users)) { setOnlineUsers(data.users); lsSaveUsers(data.users); }
+                  lsSaveMessages(historyMsgs);
+                }
+                if (data.users) {
+                  setOnlineUsers(data.users);
+                  lsSaveUsers(data.users);
+                }
+                if (data.state) {
+                  setGameState(data.state);
                 }
                 break;
               }
-              case "roomUsers": {
-                if (data.room === channelRef.current) {
-                  setOnlineUsers(Array.isArray(data.users) ? data.users : []);
-                  lsSaveUsers(Array.isArray(data.users) ? data.users : []);
+
+              // ---- ROOM USERS ----
+              case "room-users": {
+                if (data.users) {
+                  setOnlineUsers(data.users);
+                  lsSaveUsers(data.users);
                 }
                 break;
               }
-              case "state": {
-                if (data.room === channelRef.current && data.state) setGameState(data.state);
+
+              // ---- PRESENCE ----
+              case "presence": {
+                // Trigger user refresh
                 break;
               }
-              case "ping": { ws?.send(JSON.stringify({ type: "pong" })); break; }
+
+              // ---- GAME EVENTS ----
+              case "game-start":
+              case "next-turn":
+              case "wheel-result":
+              case "correct":
+              case "wrong":
+              case "game-over":
+              case "score-update":
+              case "timer": {
+                if (data.state) setGameState(data.state);
+                break;
+              }
+
+              // ---- HEARTBEAT ----
+              case "ping": {
+                ws?.send(JSON.stringify({ type: "pong" }));
+                break;
+              }
             }
           } catch { /* */ }
         };
 
         ws.onclose = () => {
-          setConnected(false); setOnlineUsers([]); wsRef.current = null;
+          setConnected(false);
+          setOnlineUsers([]);
+          wsRef.current = null;
           if (!closed && !reconnectTimer.current) {
             reconnectTimer.current = setTimeout(() => { reconnectTimer.current = null; connect(); }, 3000);
           }
         };
+
         ws.onerror = () => ws?.close();
       } catch { setConnected(false); }
     };
@@ -189,54 +247,56 @@ export function useWebSocketChat(channel: string, userId: number = 0, userName: 
       if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
       ws?.close();
     };
-  }, []);
+  }, [channel]);
 
+  // Fallback polling cuando no hay WebSocket
   useEffect(() => {
     if (connected) return;
     const interval = setInterval(() => {
-      const all = lsLoadMessages();
-      setMessages(all.filter((m) => m.channel === channelRef.current));
+      setMessages(lsLoadMessages());
       setOnlineUsers(lsLoadUsers());
     }, 1000);
     return () => clearInterval(interval);
   }, [connected]);
 
-  useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && userRef.current) {
-      wsRef.current.send(JSON.stringify({
-        type: "join", room: channel,
-        senderId: userRef.current.id, senderName: userRef.current.name,
-      }));
+  // ---- ACTIONS ----
+
+  const joinRoom = useCallback((uid: number, uname: string) => {
+    userRef.current = { id: uid, name: uname };
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "join-room", roomId: channelRef.current, senderId: uid, senderName: uname }));
     }
-  }, [channel]);
+  }, []);
 
-  const sendMessage = useCallback(
-    (senderId: number, senderName: string, content: string): boolean => {
-      const trimmed = content.trim();
-      if (!trimmed) return false;
-      const censored = censorText(trimmed);
-      if (!userRef.current && senderId) userRef.current = { id: senderId, name: senderName || "Anonimo" };
+  const sendMessage = useCallback((senderId: number, senderName: string, content: string): boolean => {
+    const trimmed = content.trim();
+    if (!trimmed) return false;
+    const censored = censorText(trimmed);
+    if (!userRef.current) userRef.current = { id: senderId, name: senderName };
 
-      const msg: ChatMessage = {
-        id: makeId(Date.now()),
-        senderId, senderName: senderName || "Anonimo",
-        content: censored, timestamp: Date.now(), channel: channelRef.current,
-      };
+    const msg: ChatMessage = { id: makeId(Date.now()), senderId, senderName: senderName || "Anonimo", content: censored, timestamp: Date.now() };
+    const all = lsLoadMessages(); all.push(msg); lsSaveMessages(all);
+    setMessages((prev) => [...prev, msg]);
 
-      const all = lsLoadMessages(); all.push(msg); lsSaveMessages(all);
-      setMessages((prev) => [...prev, msg]);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "chat-message", roomId: channelRef.current, content: censored }));
+    } else {
+      try { localStorage.setItem("senda_chat_trigger", Date.now().toString()); } catch { /* */ }
+    }
+    return true;
+  }, []);
 
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: "chat", room: channelRef.current,
-          senderId, senderName, content: censored, timestamp: msg.timestamp,
-        }));
-      } else {
-        try { localStorage.setItem("senda_chat_trigger", Date.now().toString()); } catch { /* */ }
-      }
-      return true;
-    }, []
-  );
+  const sendTyping = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && userRef.current) {
+      wsRef.current.send(JSON.stringify({ type: "typing", roomId: channelRef.current, senderId: userRef.current.id }));
+    }
+  }, []);
 
-  return { messages, send: sendMessage, connected, onlineUsers, gameState };
+  const leaveRoom = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && userRef.current) {
+      wsRef.current.send(JSON.stringify({ type: "leave-room", roomId: channelRef.current, senderId: userRef.current.id }));
+    }
+  }, []);
+
+  return { messages, send: sendMessage, connected, onlineUsers, gameState, joinRoom, sendTyping, leaveRoom };
 }
