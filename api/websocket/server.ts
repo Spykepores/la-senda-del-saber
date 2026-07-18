@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
-import type { GameServer, WSMessage, Client, Room, GameState, PlayerInfo } from "./types";
+import type { GameServer, WSMessage, Client, PlayerInfo } from "./types";
 import { QUESTION_TIME_MS } from "./types";
 
 // Modulos
@@ -9,13 +9,15 @@ import {
 } from "./players";
 import {
   createRoom, getRoom, getRoomBySyncCode, addPlayerToRoom,
-  removePlayerFromRoom, startGame, generateSyncCode,
+  removePlayerFromRoom, startGame,
 } from "./rooms";
 import { addChatMessage, getChatHistory } from "./chat";
 import {
   rollDice, spinRoulette, processAnswer, continueAfterCorrect,
   processForfeit, decrementTimer, buildFullState, setPlayerReady,
 } from "./game";
+import { applyGameAction, getFullGameState } from "../game-socket-bridge";
+import type { DuelAction } from "../lib/duel-engine";
 
 // ============================================================
 // SERVIDOR GLOBAL
@@ -98,6 +100,15 @@ function sendReconnectState(ws: WebSocket, roomId: string): void {
     state: { ...fullState.game, players: fullState.players },
     history,
     users: getPresenceUsers(server, roomId),
+  });
+}
+
+// Broadcast estado de duelo a todos los clientes de una sala
+export function broadcastGameState(roomId: string, state: any): void {
+  broadcastAll(roomId, {
+    type: "game_state",
+    roomId,
+    state,
   });
 }
 
@@ -401,6 +412,34 @@ export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.
               });
               sendGameState(roomId);
             }
+            break;
+          }
+
+          // ---- GAME ACTION (duelo) ----
+          case "game_action": {
+            const roomId = msg.roomId;
+            const action = msg.action;
+            if (!roomId || !action || !client.playerId) break;
+
+            // Parse challenge ID from room (format: "duel_<challengeId>")
+            const challengeId = Number(roomId.replace("duel_", ""));
+            if (isNaN(challengeId) || challengeId <= 0) break;
+
+            // Async handler
+            const handleAction = async () => {
+              try {
+                const result = await applyGameAction(challengeId, action as DuelAction, client.playerId);
+                if (result.error) {
+                  send(ws, { type: "game_error" as any, roomId, gameError: result.error });
+                } else if (result.broadcast) {
+                  const fullState = await getFullGameState(challengeId);
+                  if (fullState) broadcastGameState(roomId, fullState);
+                }
+              } catch (e: any) {
+                send(ws, { type: "game_error" as any, roomId, gameError: e.message || "Error procesando accion" });
+              }
+            };
+            handleAction();
             break;
           }
 
