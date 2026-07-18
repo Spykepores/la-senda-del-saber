@@ -98,6 +98,8 @@ export const challenges = pgTable("challenges", {
   opponentSeals: text("opponentSeals"),
   currentCategory: varchar("currentCategory", { length: 50 }),
   currentQuestionId: bigint("currentQuestionId", { mode: "number" }),
+  roomCode: varchar("roomCode", { length: 10 }).unique(),
+  currentTurnUserId: bigint("currentTurnUserId", { mode: "number" }),
   startedAt: timestamp("startedAt"),
   endedAt: timestamp("endedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
