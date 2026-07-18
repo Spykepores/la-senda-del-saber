@@ -6,8 +6,9 @@ import { useChallenge, useChallengeChat, useForfeitDuel } from "@/hooks/useDuel"
 import { questions as allQuestions } from "@/data/questions";
 import { CATEGORIES } from "@/types/game";
 import type { Question } from "@/types/game";
+import PageHeader from "@/components/PageHeader";
 import {
-  ChevronLeft, Swords, Zap, Hourglass, Flag, CheckCircle, XCircle, Crown, RotateCcw,
+  Zap, Hourglass, Flag, CheckCircle, XCircle, Crown, RotateCcw,
   Send, Lock, MessageSquare, Users, Radio, Copy, Check, Hash, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6
 } from "lucide-react";
 
@@ -36,7 +37,6 @@ export default function ChallengeGamePage() {
   const cid = Number(id);
   const { user } = useAuth();
 
-  // Get challenge from localStorage sync
   const { data: challenge, isLoading: challengeLoading } = useChallenge(cid);
 
   const uid = user?.id ?? 0;
@@ -47,9 +47,6 @@ export default function ChallengeGamePage() {
         : challenge.challengerName)
     : "Rival";
 
-  // Init game with challenge info
-  // isJoining = true when entering via "join room" (dice roll decides who starts)
-  // isJoining = false when accepting a direct challenge (acceptor starts)
   const isJoining = challenge ? (challenge.challengerId !== uid && challenge.opponentId === uid) : false;
   const cInfo = challenge
     ? { cId: challenge.challengerId, cName: challenge.challengerName, oId: challenge.opponentId || 0, oName: challenge.opponentName || "Rival", isJoining }
@@ -57,31 +54,24 @@ export default function ChallengeGamePage() {
 
   const game = useChallengeSealsGame(cid, uid, cInfo);
 
-  // Dice animation state
   const [rollingDice, setRollingDice] = useState(false);
   const [diceAnimValue, setDiceAnimValue] = useState(1);
 
-  // Chat via localStorage sync
   const { messages, send } = useChallengeChat(cid);
   const [chatInput, setChatInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Forfeit
   const [forfeitConfirm, setForfeitConfirm] = useState(false);
 
-  // Roulette
   const [spinAngle, setSpinAngle] = useState(0);
   const [spinning, setSpinning] = useState(false);
 
-  // Question
   const [question, setQuestion] = useState<Question | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [showExp, setShowExp] = useState(false);
 
-  // Copy code
   const [copied, setCopied] = useState(false);
 
-  // Chat scroll
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const timerPct = game.isMyTurn && game.phase === "question" ? game.timerPct : 100;
@@ -143,8 +133,6 @@ export default function ChallengeGamePage() {
   const handleRollDice = () => {
     if (rollingDice || game.myDice) return;
     setRollingDice(true);
-
-    // Animate dice rolling
     let count = 0;
     const animInterval = setInterval(() => {
       setDiceAnimValue(Math.floor(Math.random() * 6) + 1);
@@ -173,7 +161,6 @@ export default function ChallengeGamePage() {
     }
   };
 
-  // Waiting for opponent state
   const waitingForOpponent = challenge && challenge.status !== "active" && challenge.status !== "completed";
 
   if (!user) return <div className="min-h-screen bg-indigo-950 flex items-center justify-center text-white"><div className="animate-pulse">Cargando sesion...</div></div>;
@@ -182,25 +169,21 @@ export default function ChallengeGamePage() {
 
   return (
     <div className="min-h-screen bg-indigo-950 text-white flex flex-col">
-      {/* Header */}
-      <div className="bg-indigo-900/50 border-b border-white/10 px-4 py-3">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
-          <Link to="/challenges" className="flex items-center gap-1 text-white/60 hover:text-white transition text-sm"><ChevronLeft className="w-5 h-5" /></Link>
+      <PageHeader
+        title={`Desafio #${cid}`}
+        rightContent={
           <div className="flex items-center gap-2">
-            <Swords className="w-5 h-5 text-amber-400" />
-            <span className="font-bold text-sm">Desafio #{cid}</span>
             <span className={`text-xs px-2 py-0.5 rounded-full ${game.isFinished ? "bg-amber-500/20 text-amber-400" : waitingForOpponent ? "bg-blue-500/20 text-blue-400" : game.isMyTurn ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400"}`}>
               {game.isFinished ? "Finalizado" : waitingForOpponent ? "Esperando" : game.isMyTurn ? "Tu turno" : "Turno rival"}
             </span>
+            <span className="flex items-center gap-1 text-green-400 text-xs">
+              <Radio className="w-3 h-3 animate-pulse" />
+              <span className="hidden sm:inline">Sync</span>
+            </span>
           </div>
-          <div className="flex items-center gap-1 text-green-400 text-xs">
-            <Radio className="w-3 h-3 animate-pulse" />
-            <span>Sinc.</span>
-          </div>
-        </div>
-      </div>
+        }
+      />
 
-      {/* CODE BANNER - always visible when waiting */}
       {waitingForOpponent && challenge.syncCode && (
         <div className="bg-green-500/10 border-b border-green-500/20 px-4 py-2">
           <div className="max-w-5xl mx-auto flex items-center justify-center gap-3">
@@ -216,17 +199,13 @@ export default function ChallengeGamePage() {
       )}
 
       <div className="flex-1 flex max-w-5xl mx-auto w-full overflow-hidden">
-        {/* GAME AREA */}
         <div className="flex-1 p-4 overflow-y-auto">
 
-          {/* DICE ROLL PHASE */}
           {game.phase === "dice_roll" && !game.isFinished && (
             <div className="text-center py-10">
               <h2 className="text-2xl font-bold mb-2">Tira los dados!</h2>
               <p className="text-white/50 text-sm mb-6">El jugador con el numero mas alto comienza</p>
-
               <div className="flex justify-center items-center gap-8 mb-8">
-                {/* My dice */}
                 <div className="text-center">
                   <p className="text-xs text-white/50 mb-2">Tu</p>
                   <div className="w-24 h-24 bg-white/10 rounded-2xl flex items-center justify-center border border-white/20">
@@ -238,10 +217,7 @@ export default function ChallengeGamePage() {
                   </div>
                   {game.myDice && <p className="text-xl font-bold text-amber-400 mt-2">{game.myDice}</p>}
                 </div>
-
                 <div className="text-2xl font-bold text-white/30">VS</div>
-
-                {/* Opponent dice */}
                 <div className="text-center">
                   <p className="text-xs text-white/50 mb-2">{oppName}</p>
                   <div className="w-24 h-24 bg-white/10 rounded-2xl flex items-center justify-center border border-white/20">
@@ -254,8 +230,6 @@ export default function ChallengeGamePage() {
                   {game.oppDice && <p className="text-xl font-bold text-red-400 mt-2">{game.oppDice}</p>}
                 </div>
               </div>
-
-              {/* Result message */}
               {game.diceRolled && game.diceWinnerId !== undefined && (
                 <div className="mb-6">
                   {game.diceWinnerId === uid ? (
@@ -271,16 +245,12 @@ export default function ChallengeGamePage() {
                   )}
                 </div>
               )}
-
-              {/* Tie message */}
               {game.myDice && game.oppDice && game.myDice === game.oppDice && (
                 <div className="mb-6 bg-yellow-500/20 rounded-xl p-4 border border-yellow-500/30">
                   <p className="text-yellow-400 font-bold text-lg">Empate!</p>
                   <p className="text-white/50 text-sm">Tiran de nuevo...</p>
                 </div>
               )}
-
-              {/* Roll button */}
               {!game.myDice && (
                 <button onClick={handleRollDice} disabled={rollingDice}
                   className="px-8 py-4 bg-amber-500 text-indigo-950 rounded-2xl font-bold text-lg hover:bg-amber-400 transition disabled:opacity-50"
@@ -288,8 +258,6 @@ export default function ChallengeGamePage() {
                   {rollingDice ? "Tirando..." : "Tirar Dado"}
                 </button>
               )}
-
-              {/* Waiting message after I rolled */}
               {game.myDice && !game.oppDice && (
                 <div className="flex items-center justify-center gap-2 text-white/50">
                   <Hourglass className="w-4 h-4 animate-pulse" />
@@ -299,13 +267,10 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* WAITING FOR OPPONENT */}
           {waitingForOpponent && !game.isFinished && (
             <div className="text-center py-12">
               <Users className="w-12 h-12 text-blue-400 mx-auto mb-4" />
               <h2 className="text-xl font-bold mb-2">Esperando rival</h2>
-              
-              {/* Big code display */}
               {challenge.syncCode && (
                 <div className="bg-white/5 rounded-2xl p-6 border border-white/10 max-w-xs mx-auto mb-4">
                   <p className="text-xs text-white/50 mb-2">COMPARTE ESTE CODIGO</p>
@@ -315,11 +280,9 @@ export default function ChallengeGamePage() {
                   </button>
                 </div>
               )}
-
               <p className="text-white/40 text-xs max-w-xs mx-auto mb-4">
                 El otro jugador debe ir a "Desafios Online" y presionar "Unirse por Codigo"
               </p>
-
               <div className="bg-white/5 rounded-xl p-4 border border-white/10 max-w-sm mx-auto">
                 <p className="text-xs text-white/50 mb-1">Creado por</p>
                 <p className="font-bold text-sm">{challenge.challengerName}</p>
@@ -329,7 +292,6 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* FINISHED */}
           {game.isFinished && (
             <div className="text-center py-8 space-y-4">
               {game.state?.winnerId === uid ? (<><Crown className="w-16 h-16 text-amber-400 mx-auto mb-3" /><h2 className="text-3xl font-bold text-amber-400">Ganaste!</h2><p className="text-white/60">Rompiste todos los sellos!</p></>)
@@ -355,7 +317,6 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* OPPONENT TURN */}
           {!waitingForOpponent && !game.isFinished && !game.isMyTurn && (
             <div className="text-center py-16">
               <Hourglass className="w-12 h-12 text-amber-400 mx-auto mb-4" />
@@ -365,7 +326,6 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* MY TURN - START */}
           {!waitingForOpponent && !game.isFinished && game.isMyTurn && game.phase === "waiting" && (
             <div className="text-center py-16">
               <Zap className="w-16 h-16 text-amber-400 mx-auto mb-4" />
@@ -378,7 +338,6 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* ROULETTE */}
           {!waitingForOpponent && !game.isFinished && game.phase === "roulette" && (
             <div className="flex flex-col items-center justify-center py-8">
               <p className="text-white/50 text-sm mb-4">{spinning ? "Girando..." : "Categoria seleccionada"}</p>
@@ -390,10 +349,8 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* QUESTION */}
           {!waitingForOpponent && !game.isFinished && game.phase === "question" && question && (
             <div className="max-w-lg mx-auto">
-              {/* Timer */}
               <div className="flex justify-center mb-4">
                 <div className="relative w-20 h-20">
                   <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
@@ -406,8 +363,6 @@ export default function ChallengeGamePage() {
                 </div>
               </div>
               <div className="text-center mb-3"><span className="text-xs text-white/50">Tu turno | Sellos: {myB}/7</span></div>
-
-              {/* Question Card */}
               <div className="rounded-3xl overflow-hidden" style={{ background: 'linear-gradient(180deg, #1e1b4b 0%, #312e81 100%)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <div className="px-5 py-3 flex items-center justify-between" style={{ backgroundColor: `${cColor(question.category)}33`, borderBottom: `2px solid ${cColor(question.category)}66` }}>
                   <span className="text-white font-semibold text-sm">{cName(question.category)}</span>
@@ -450,7 +405,6 @@ export default function ChallengeGamePage() {
             </div>
           )}
 
-          {/* RESULT CORRECT */}
           {!waitingForOpponent && !game.isFinished && game.phase === "result" && (
             <div className="text-center py-16">
               <CheckCircle className="w-16 h-16 text-green-400 mx-auto mb-4" />
@@ -460,9 +414,7 @@ export default function ChallengeGamePage() {
           )}
         </div>
 
-        {/* SIDE PANEL */}
         <div className="w-64 border-l border-white/10 flex flex-col bg-indigo-900/30 hidden md:flex">
-          {/* Room code in sidebar */}
           {challenge.syncCode && (
             <div className="p-3 border-b border-white/10 bg-green-500/5">
               <div className="flex items-center justify-between">
@@ -495,7 +447,6 @@ export default function ChallengeGamePage() {
             </div>
           </div>
 
-          {/* Chat */}
           <div className="flex-1 flex flex-col min-h-0">
             <div className="p-2 border-b border-white/10 flex items-center justify-between">
               <span className="text-xs font-bold text-white/50 flex items-center gap-1"><MessageSquare className="w-3 h-3 text-amber-400" />Chat</span>
@@ -529,7 +480,6 @@ export default function ChallengeGamePage() {
         </div>
       </div>
 
-      {/* Forfeit Modal */}
       {forfeitConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4" onClick={() => setForfeitConfirm(false)}>
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
