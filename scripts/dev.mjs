@@ -6,13 +6,17 @@ import { mkdirSync } from "node:fs";
 
 mkdirSync("dist-dev", { recursive: true });
 
-// 1. Empaquetar SOLO el servidor WS (dependencia unica: ws) - rapido y sin env
+// 1. Empaquetar SOLO el servidor WS (dependencia unica: ws) - rapido y sin env.
+//    El banner createRequire es OBLIGATORIO: ws usa require() de modulos node internos.
 await build({
   entryPoints: ["api/ws-dev.ts"],
   platform: "node",
   bundle: true,
   format: "esm",
   outfile: "dist-dev/ws-dev.js",
+  banner: {
+    js: "import { createRequire } from 'module';const require = createRequire(import.meta.url);",
+  },
   logLevel: "info",
 });
 
@@ -22,7 +26,7 @@ const wsServer = spawn(process.execPath, ["dist-dev/ws-dev.js"], {
   env: process.env,
 });
 
-// 3. Iniciar Vite (puerto 5173)
+// 3. Iniciar Vite accesible en red local (puerto 5173)
 const viteCmd = process.platform === "win32" ? "npx.cmd" : "npx";
 const vite = spawn(viteCmd, ["vite", "--host"], { stdio: "inherit" });
 
