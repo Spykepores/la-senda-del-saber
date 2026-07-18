@@ -1,24 +1,25 @@
-import { createRouter } from "./middleware";
-import { duelRouter } from "./challenge-router";
-import { challengesRouter } from "./challenges-router";
+import { authRouter } from "./auth-router";
 import { questionsRouter } from "./questions-router";
 import { seasonsRouter } from "./seasons-router";
-import { eventsRouter } from "./events-router";
-import { playerStatsRouter } from "./player-stats-router";
 import { messagesRouter } from "./messages-router";
-import { localAuthRouter } from "./local-auth-router";
+import { playerStatsRouter } from "./player-stats-router";
+import { eventsRouter } from "./events-router";
 import { adminRouter } from "./admin-router";
+import { localAuthRouter } from "./local-auth-router";
+import { duelRouter } from "./challenge-router";
+import { createRouter, publicQuery } from "./middleware";
 
 export const appRouter = createRouter({
-  duel: duelRouter,
-  challenges: challengesRouter,
+  ping: publicQuery.query(() => ({ ok: true, ts: Date.now() })),
+  auth: authRouter,
   questions: questionsRouter,
   seasons: seasonsRouter,
-  events: eventsRouter,
-  playerStats: playerStatsRouter,
   messages: messagesRouter,
-  localAuth: localAuthRouter,
+  playerStats: playerStatsRouter,
+  events: eventsRouter,
   admin: adminRouter,
+  localAuth: localAuthRouter,
+  duel: duelRouter,
 });
 
 export type AppRouter = typeof appRouter;
