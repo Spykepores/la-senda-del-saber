@@ -1,68 +1,36 @@
 import { useState, useRef, useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { useWebSocketChat } from "@/hooks/useWebSocketChat";
-import { useOnlinePlayers } from "@/hooks/useDuel";
-import { Link } from "react-router";
+import { useChat } from "@/hooks/useChat";
 import PageHeader from "@/components/PageHeader";
 import {
-  Send, MessageSquare, Users, Shield,
-  Circle, Smile, Clock, Wifi, WifiOff
+  Send, Hash, Lock, Plus, User, Users, MessageCircle,
+  Radio, ArrowLeft, Globe
 } from "lucide-react";
 
-// Simple emoji picker
-const EMOJIS = ["😀", "😂", "😍", "🙏", "✝️", "📖", "❤️", "👍", "🔥", "✨", "🎉", "😊", "👏", "🌟", "💪", "😎", "🤗", "😇", "🙌", "🎵"];
-
 export default function ChatPage() {
-  const { user, isLoading: authLoading } = useAuth();
-  const { messages: globalMessages, send: sendGlobal, connected: wsConnected, onlineUsers: wsOnlineUsers } = useWebSocketChat("global", user?.id || 0, user?.name || "Jugador");
-  const localPlayers = useOnlinePlayers(user?.id || 0, user?.name || "Jugador");
+  const { user } = useAuth();
+  const userId = user?.id || Number(localStorage.getItem("senda_user_id")) || 0;
+  const userName = user?.name || localStorage.getItem("senda_user_name") || "Invitado";
 
-  const [chatInput, setChatInput] = useState("");
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chat = useChat(userId, userName);
+  const [input, setInput] = useState("");
+  const [showNewRoom, setShowNewRoom] = useState(false);
+  const [newRoomName, setNewRoomName] = useState("");
+  const [newRoomPrivate, setNewRoomPrivate] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  const [showJoinCode, setShowJoinCode] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto scroll
+  // Auto-scroll to bottom
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [globalMessages]);
-
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-indigo-950 flex items-center justify-center text-white animate-pulse">
-        Cargando...
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-indigo-950 flex items-center justify-center text-white px-4">
-        <div className="text-center max-w-sm">
-          <MessageSquare className="w-16 h-16 text-amber-400 mx-auto mb-4" />
-          <h2 className="text-2xl font-bold mb-2">Chat Global</h2>
-          <p className="text-white/60 mb-6">Inicia sesion para chatear con otros jugadores.</p>
-          <Link to="/login" className="inline-block px-6 py-3 bg-amber-500 text-indigo-950 rounded-xl font-bold hover:bg-amber-400 transition">
-            Iniciar Sesion
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  const myId = user.id;
-  const myName = user.name || `Jugador #${myId}`;
-
-  // Presencia: si el WebSocket esta conectado, usar la lista real del servidor
-  // (funciona entre navegadores y dispositivos). Si no, fallback localStorage.
-  const onlinePlayers = wsConnected
-    ? wsOnlineUsers.filter((u: any) => u.id !== myId)
-    : localPlayers;
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chat.messages]);
 
   const handleSend = () => {
-    if (!chatInput.trim()) return;
-    sendGlobal(myId, myName, chatInput.trim());
-    setChatInput("");
-    setShowEmojiPicker(false);
+    if (!input.trim()) return;
+    chat.sendMessage(input.trim());
+    setInput("");
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -72,209 +40,279 @@ export default function ChatPage() {
     }
   };
 
-  const addEmoji = (emoji: string) => {
-    setChatInput((prev) => prev + emoji);
+  const handleCreateRoom = () => {
+    if (!newRoomName.trim()) return;
+    chat.createRoom(newRoomName.trim(), newRoomPrivate).then((room) => {
+      setShowNewRoom(false);
+      setNewRoomName("");
+      setNewRoomPrivate(false);
+      if (room) chat.joinRoom(room.slug);
+    }).catch(() => {
+      alert("Error creando sala");
+    });
   };
 
-  const formatTime = (ts: number) => {
-    const d = new Date(ts);
-    return d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
-  };
+  const currentRoomName = chat.activeRoom === "global"
+    ? "Chat Global"
+    : chat.activeRoom === "dm"
+    ? (chat.privateRecipient ? `Privado con ${chat.privateRecipient}` : "Mensajes Privados")
+    : chat.publicRooms.find(r => r.slug === chat.activeRoom)?.name || chat.activeRoom;
 
   return (
-    <div className="min-h-screen bg-indigo-950 text-white flex flex-col">
-      {/* Header with back + logout + WS status */}
-      <PageHeader
-        title="Chat Global"
-        rightContent={
-          <div className="flex items-center gap-2">
-            <span
-              className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 ${
-                wsConnected
-                  ? "bg-blue-500/20 text-blue-400"
-                  : "bg-yellow-500/20 text-yellow-400"
-              }`}
-              title={wsConnected ? "WebSocket conectado" : "Modo offline (localStorage)"}
-            >
-              {wsConnected ? (
-                <><Wifi className="w-3 h-3" />WS</>
-              ) : (
-                <><WifiOff className="w-3 h-3" />Offline</>
-              )}
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 flex items-center gap-1">
-              <Circle className="w-1.5 h-1.5 fill-green-400" />
-              {onlinePlayers.length + 1} en linea
-            </span>
-          </div>
-        }
-      />
+    <div className="min-h-screen bg-[#0F172A] text-white flex flex-col">
+      <PageHeader title="Chat" />
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex flex-1 overflow-hidden" style={{ height: "calc(100vh - 64px)" }}>
+        {/* SIDEBAR */}
+        {sidebarOpen && (
+          <div className="w-72 bg-[#1E293B] border-r border-white/10 flex flex-col">
+            {/* Connection status */}
+            <div className="px-4 py-2 flex items-center gap-2 border-b border-white/10">
+              <Radio className={`w-4 h-4 ${chat.connected ? "text-green-400" : "text-red-400"}`} />
+              <span className={`text-xs ${chat.connected ? "text-green-400" : "text-red-400"}`}>
+                {chat.connected ? "Conectado" : "Desconectado"}
+              </span>
+            </div>
+
+            {/* User info */}
+            <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2">
+              <div className="w-8 h-8 rounded-full bg-[#F59E0B] flex items-center justify-center text-sm font-bold text-[#0F172A]">
+                {userName.charAt(0).toUpperCase()}
+              </div>
+              <span className="text-sm font-medium truncate">{userName}</span>
+            </div>
+
+            {/* Rooms section */}
+            <div className="flex-1 overflow-y-auto">
+              <div className="px-3 py-2 flex items-center justify-between">
+                <span className="text-xs font-semibold text-white/50 uppercase tracking-wider">Salas</span>
+                <button
+                  onClick={() => setShowNewRoom(!showNewRoom)}
+                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                  title="Crear sala"
+                >
+                  <Plus className="w-4 h-4 text-[#F59E0B]" />
+                </button>
+              </div>
+
+              {/* Global room */}
+              <button
+                onClick={() => chat.joinRoom("global")}
+                className={`w-full px-4 py-2 flex items-center gap-2 text-sm transition-colors ${
+                  chat.activeRoom === "global" ? "bg-[#F59E0B]/20 text-[#F59E0B]" : "text-white/70 hover:bg-white/5"
+                }`}
+              >
+                <Globe className="w-4 h-4" />
+                Chat Global
+              </button>
+
+              {/* Public rooms */}
+              {chat.publicRooms.map((room) => (
+                <button
+                  key={room.id}
+                  onClick={() => chat.joinRoom(room.slug)}
+                  className={`w-full px-4 py-2 flex items-center gap-2 text-sm transition-colors ${
+                    chat.activeRoom === room.slug ? "bg-[#F59E0B]/20 text-[#F59E0B]" : "text-white/70 hover:bg-white/5"
+                  }`}
+                >
+                  <Hash className="w-4 h-4" />
+                  <span className="truncate">{room.name}</span>
+                </button>
+              ))}
+
+              {/* Join by code */}
+              <button
+                onClick={() => setShowJoinCode(!showJoinCode)}
+                className="w-full px-4 py-2 flex items-center gap-2 text-sm text-white/50 hover:bg-white/5 transition-colors"
+              >
+                <Lock className="w-4 h-4" />
+                Unirse por codigo
+              </button>
+
+              {/* Online users */}
+              <div className="mt-4 px-3 py-2 flex items-center gap-2">
+                <Users className="w-4 h-4 text-white/50" />
+                <span className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+                  En linea ({chat.onlineUsers.length})
+                </span>
+              </div>
+              {chat.onlineUsers.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => chat.openPrivateChat(u.id)}
+                  className={`w-full px-4 py-2 flex items-center gap-2 text-sm transition-colors ${
+                    chat.activeRoom === "dm" && chat.privateRecipient === u.id
+                      ? "bg-[#F59E0B]/20 text-[#F59E0B]"
+                      : "text-white/60 hover:bg-white/5"
+                  }`}
+                >
+                  <User className="w-4 h-4" />
+                  <span className="truncate">{u.name}</span>
+                  <span className="w-2 h-2 rounded-full bg-green-400 ml-auto" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* MAIN CHAT AREA */}
-        <div className="flex-1 flex flex-col">
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-4 py-4">
-            <div className="max-w-3xl mx-auto space-y-3">
-              {globalMessages.length === 0 && (
-                <div className="text-center py-16 text-white/30">
-                  <MessageSquare className="w-16 h-16 mx-auto mb-4 opacity-20" />
-                  <p className="text-lg font-medium mb-1">Bienvenido al Chat Global</p>
-                  <p className="text-sm text-white/40 mb-4">
-                    Escribe un mensaje para comenzar a chatear con otros jugadores
-                  </p>
-                  <div className="flex items-center justify-center gap-2 text-xs text-white/30">
-                    <Shield className="w-3 h-3 text-green-400" />
-                    Filtro de palabras ofensivas activado
-                  </div>
-                </div>
-              )}
-
-              {globalMessages.map((msg: any) => {
-                const isMine = msg.senderId === myId;
-                return (
-                  <div
-                    key={msg.id}
-                    className={`flex ${isMine ? "justify-end" : "justify-start"}`}
-                  >
-                    <div className={`max-w-[75%] ${isMine ? "order-2" : "order-1"}`}>
-                      {!isMine && (
-                        <span className="text-[10px] text-amber-400/70 ml-2 font-medium">
-                          {msg.senderName}
-                        </span>
-                      )}
-                      <div
-                        className={`px-4 py-2.5 rounded-2xl text-sm ${
-                          isMine
-                            ? "bg-amber-500 text-indigo-950 rounded-br-sm font-medium"
-                            : "bg-white/10 text-white rounded-bl-sm"
-                        }`}
-                      >
-                        {msg.content}
-                      </div>
-                      <span
-                        className={`text-[10px] text-white/30 mt-0.5 flex items-center gap-0.5 ${
-                          isMine ? "justify-end mr-1" : "ml-1"
-                        }`}
-                      >
-                        <Clock className="w-2.5 h-2.5" />
-                        {formatTime(msg.timestamp)}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={chatEndRef} />
-            </div>
-          </div>
-
-          {/* Input Area */}
-          <div className="border-t border-white/10 bg-indigo-900/30 px-4 py-3">
-            <div className="max-w-3xl mx-auto">
-              {showEmojiPicker && (
-                <div className="mb-2 p-2 bg-white/5 rounded-xl border border-white/10">
-                  <div className="flex flex-wrap gap-1">
-                    {EMOJIS.map((emoji) => (
-                      <button
-                        key={emoji}
-                        onClick={() => addEmoji(emoji)}
-                        className="w-8 h-8 flex items-center justify-center text-lg hover:bg-white/10 rounded-lg transition"
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                  className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white/50 hover:text-amber-400 transition"
-                >
-                  <Smile className="w-5 h-5" />
-                </button>
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Escribe un mensaje..."
-                  className="flex-1 px-4 py-2.5 rounded-xl bg-white/10 border border-white/20 text-white text-sm placeholder:text-white/30 focus:outline-none focus:border-amber-500/50"
-                />
-                <button
-                  onClick={handleSend}
-                  disabled={!chatInput.trim()}
-                  className="px-4 py-2.5 rounded-xl bg-amber-500 text-indigo-950 hover:bg-amber-400 transition disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </div>
-              <p className="text-center text-[10px] text-white/20 mt-2">
-                Chat con filtro de contenido • Se respetuoso con los demas jugadores
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* ONLINE PLAYERS SIDEBAR */}
-        <div className="w-64 border-l border-white/10 bg-indigo-900/20 flex-col hidden lg:flex">
-          <div className="p-3 border-b border-white/10 flex items-center gap-2">
-            <Users className="w-4 h-4 text-amber-400" />
-            <span className="text-sm font-bold">Jugadores en Linea</span>
-            <span className="text-[10px] text-green-400 ml-auto flex items-center gap-1">
-              <Circle className="w-1.5 h-1.5 fill-green-400" />
-              {onlinePlayers.length + 1}
-            </span>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
-            <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-amber-500/10">
-              <div className="relative">
-                <div className="w-8 h-8 rounded-full bg-amber-500/30 flex items-center justify-center text-amber-400 text-xs font-bold">
-                  {myName.charAt(0).toUpperCase()}
-                </div>
-                <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-400 rounded-full border-2 border-indigo-950" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{myName}</p>
-                <p className="text-[10px] text-green-400">Tu</p>
-              </div>
-            </div>
-
-            {onlinePlayers.map((p: any) => (
-              <div key={p.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-white/5 transition">
-                <div className="relative">
-                  <div className="w-8 h-8 rounded-full bg-indigo-500/30 flex items-center justify-center text-indigo-300 text-xs font-bold">
-                    {p.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-400 rounded-full border-2 border-indigo-950" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm truncate">{p.name}</p>
-                  <p className="text-[10px] text-green-400/70">En linea</p>
-                </div>
-              </div>
-            ))}
-
-            {onlinePlayers.length === 0 && (
-              <div className="text-center py-6 text-white/30">
-                <Users className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                <p className="text-xs">No hay otros jugadores</p>
-                <p className="text-[10px]">Cuando alguien se conecte aparecera aqui</p>
-              </div>
+        <div className="flex-1 flex flex-col bg-[#0F172A]">
+          {/* Chat header */}
+          <div className="h-14 border-b border-white/10 flex items-center px-4 gap-3">
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-1 rounded hover:bg-white/10 transition-colors"
+            >
+              {sidebarOpen ? <ArrowLeft className="w-5 h-5" /> : <MessageCircle className="w-5 h-5" />}
+            </button>
+            {chat.activeRoom === "dm" ? (
+              <Lock className="w-4 h-4 text-[#F59E0B]" />
+            ) : (
+              <Hash className="w-4 h-4 text-[#F59E0B]" />
+            )}
+            <span className="font-semibold text-sm">{currentRoomName}</span>
+            {chat.publicRooms.find(r => r.slug === chat.activeRoom)?.isPrivate && (
+              <span className="text-xs bg-[#F59E0B]/20 text-[#F59E0B] px-2 py-0.5 rounded">Privada</span>
             )}
           </div>
 
-          <div className="p-3 border-t border-white/10">
-            <p className="text-[10px] text-white/30 text-center">
-              {wsConnected
-                ? "Conectado: puedes chatear con jugadores en otros navegadores y dispositivos"
-                : "Modo offline: inicia el servidor con npm run dev:all para chat en linea"}
-            </p>
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+            {chat.messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-white/30">
+                <MessageCircle className="w-12 h-12 mb-3" />
+                <p className="text-sm">No hay mensajes aun</p>
+                <p className="text-xs mt-1">Se el primero en escribir</p>
+              </div>
+            )}
+            {chat.messages.map((msg) => {
+              const isMine = msg.senderId === userId;
+              return (
+                <div key={msg.id} className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
+                  <div className={`max-w-[70%] ${isMine ? "order-2" : "order-1"}`}>
+                    {!isMine && (
+                      <span className="text-xs text-white/50 ml-1">{msg.senderName}</span>
+                    )}
+                    <div
+                      className={`px-3 py-2 rounded-2xl text-sm ${
+                        isMine
+                          ? "bg-[#F59E0B] text-[#0F172A] rounded-br-sm"
+                          : "bg-[#1E293B] text-white rounded-bl-sm border border-white/10"
+                      }`}
+                    >
+                      {msg.content}
+                    </div>
+                    <span className={`text-[10px] text-white/30 mt-0.5 block ${isMine ? "text-right mr-1" : "ml-1"}`}>
+                      {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input */}
+          <div className="border-t border-white/10 px-4 py-3">
+            <div className="flex items-center gap-2 bg-[#1E293B] rounded-2xl px-4 py-2 border border-white/10">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Escribe un mensaje..."
+                className="flex-1 bg-transparent text-sm text-white placeholder-white/30 outline-none"
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className={`p-2 rounded-xl transition-colors ${
+                  input.trim() ? "bg-[#F59E0B] text-[#0F172A] hover:bg-[#F59E0B]/80" : "bg-white/5 text-white/20"
+                }`}
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Create Room Modal */}
+      {showNewRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowNewRoom(false)} />
+          <div className="relative bg-[#1E293B] rounded-2xl p-6 w-full max-w-md border border-white/10">
+            <h3 className="text-lg font-bold mb-4">Crear Sala</h3>
+            <input
+              type="text"
+              value={newRoomName}
+              onChange={(e) => setNewRoomName(e.target.value)}
+              placeholder="Nombre de la sala"
+              className="w-full bg-[#0F172A] border border-white/10 rounded-xl px-4 py-2 text-sm text-white placeholder-white/30 outline-none focus:border-[#F59E0B] mb-3"
+            />
+            <label className="flex items-center gap-2 text-sm text-white/70 mb-4">
+              <input
+                type="checkbox"
+                checked={newRoomPrivate}
+                onChange={(e) => setNewRoomPrivate(e.target.checked)}
+                className="rounded"
+              />
+              Sala privada (requiere codigo de invitacion)
+            </label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowNewRoom(false)}
+                className="flex-1 py-2 rounded-xl bg-white/5 text-white/70 hover:bg-white/10 text-sm transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleCreateRoom}
+                disabled={!newRoomName.trim()}
+                className="flex-1 py-2 rounded-xl bg-[#F59E0B] text-[#0F172A] font-semibold hover:bg-[#F59E0B]/80 text-sm transition-colors disabled:opacity-50"
+              >
+                Crear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Join by Code Modal */}
+      {showJoinCode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowJoinCode(false)} />
+          <div className="relative bg-[#1E293B] rounded-2xl p-6 w-full max-w-md border border-white/10">
+            <h3 className="text-lg font-bold mb-4">Unirse por Codigo</h3>
+            <input
+              type="text"
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+              placeholder="Codigo de 6 caracteres"
+              maxLength={6}
+              className="w-full bg-[#0F172A] border border-white/10 rounded-xl px-4 py-2 text-sm text-white placeholder-white/30 outline-none focus:border-[#F59E0B] mb-4 tracking-widest uppercase text-center"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowJoinCode(false)}
+                className="flex-1 py-2 rounded-xl bg-white/5 text-white/70 hover:bg-white/10 text-sm transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  setShowJoinCode(false);
+                  setJoinCode("");
+                }}
+                disabled={joinCode.length < 6}
+                className="flex-1 py-2 rounded-xl bg-[#F59E0B] text-[#0F172A] font-semibold hover:bg-[#F59E0B]/80 text-sm transition-colors disabled:opacity-50"
+              >
+                Unirse
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
