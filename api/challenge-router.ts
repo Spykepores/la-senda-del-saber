@@ -1,20 +1,14 @@
 import { z } from "zod";
-import { eq, or, desc, and, ne } from "drizzle-orm";
-import { challenges, challengeMessages, users, localUsers, questions } from "../db/schema";
+import { eq, desc, inArray } from "drizzle-orm";
+import { challenges, users, localUsers, questions, userProgress } from "../db/schema";
 import { getDb } from "./queries/connection";
-import { authedQuery } from "./middleware";
-import { createRouter } from "./middleware";
+import { authedQuery, createRouter } from "./middleware";
 import { TRPCError } from "@trpc/server";
+import { processGameAction, type GameAction, type GameStateDTO, emptyState } from "./lib/duel-engine";
 
-const SEALS_TO_BREAK = 2;
-const CATEGORIES = ["genealogy", "parables", "stories", "prophecy", "doctrine", "characters", "books"];
+const db = getDb();
 
-function initSeals() {
-  const seals: Record<string, number> = {};
-  CATEGORIES.forEach((c) => (seals[c] = 0));
-  return JSON.stringify(seals);
-}
-
+// Generate a 6-char room code
 function generateRoomCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -22,341 +16,222 @@ function generateRoomCode(): string {
   return code;
 }
 
-export async function getUserName(userId: number) {
-  const db = getDb();
-  const [oauth] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (oauth) return oauth.name || `Jugador #${userId}`;
-  const [local] = await db.select().from(localUsers).where(eq(localUsers.id, userId)).limit(1);
-  if (local) return local.name || `Jugador #${userId}`;
-  return `Jugador #${userId}`;
-}
-
-async function ensureUniqueRoomCode(db: ReturnType<typeof getDb>): Promise<string> {
-  for (let attempts = 0; attempts < 10; attempts++) {
-    const code = generateRoomCode();
-    const existing = await db.select().from(challenges).where(eq(challenges.roomCode, code)).limit(1);
-    if (existing.length === 0) return code;
-  }
-  return generateRoomCode() + Math.floor(Math.random() * 10);
+// Get a user name from users or localUsers table
+export async function getUserName(userId: number): Promise<string> {
+  const [u] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (u) return u.name || `Usuario #${userId}`;
+  const [lu] = await db.select().from(localUsers).where(eq(localUsers.id, userId)).limit(1);
+  if (lu) return lu.name || `Usuario #${userId}`;
+  return `Usuario #${userId}`;
 }
 
 export const duelRouter = createRouter({
-  // List all active/open challenges
-  list: authedQuery.query(async ({ ctx }) => {
-    const db = getDb();
-    const rows = await db
-      .select()
-      .from(challenges)
-      .where(or(eq(challenges.status, "pending"), eq(challenges.status, "active")))
-      .orderBy(desc(challenges.createdAt));
-    const result = [];
-    for (const row of rows) {
-      const challengerName = await getUserName(row.challengerId);
-      const opponentName = row.opponentId ? await getUserName(row.opponentId) : null;
-      result.push({
-        id: row.id,
-        challengerId: row.challengerId,
-        challengerName,
-        opponentId: row.opponentId,
-        opponentName,
-        status: row.status,
-        winnerId: row.winnerId,
-        createdAt: row.createdAt,
-        isMine: row.challengerId === ctx.user.id || row.opponentId === ctx.user.id,
-        currentCategory: row.currentCategory,
-        roomCode: row.roomCode,
-        currentTurnUserId: row.currentTurnUserId,
-      });
-    }
-    return result;
-  }),
-
-  // List public challenges (open rooms without opponent)
-  listPublic: authedQuery.query(async ({ ctx }) => {
-    const db = getDb();
-    const rows = await db
-      .select()
-      .from(challenges)
-      .where(and(eq(challenges.status, "active"), eq(challenges.opponentId, 0)))
-      .orderBy(desc(challenges.createdAt));
-    const result = [];
-    for (const row of rows) {
-      if (row.challengerId === ctx.user.id) continue;
-      const challengerName = await getUserName(row.challengerId);
-      result.push({
-        id: row.id,
-        challengerId: row.challengerId,
-        challengerName,
-        status: row.status,
-        createdAt: row.createdAt,
-        roomCode: row.roomCode,
-      });
-    }
-    return result;
-  }),
-
-  // List my challenges
-  listMine: authedQuery.query(async ({ ctx }) => {
-    const db = getDb();
-    const rows = await db
-      .select()
-      .from(challenges)
-      .where(or(eq(challenges.challengerId, ctx.user.id), eq(challenges.opponentId, ctx.user.id)))
-      .orderBy(desc(challenges.createdAt));
-    const result = [];
-    for (const row of rows) {
-      const challengerName = await getUserName(row.challengerId);
-      const opponentName = row.opponentId ? await getUserName(row.opponentId) : null;
-      result.push({
-        id: row.id,
-        challengerId: row.challengerId,
-        challengerName,
-        opponentId: row.opponentId,
-        opponentName,
-        status: row.status,
-        winnerId: row.winnerId,
-        createdAt: row.createdAt,
-        roomCode: row.roomCode,
-      });
-    }
-    return result;
-  }),
-
-  // Create a challenge
   create: authedQuery
-    .input(z.object({ opponentId: z.number().optional(), name: z.string().optional() }))
+    .input(z.object({ opponentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      const roomCode = await ensureUniqueRoomCode(db);
-      const inserted = await db
+      const [challenge] = await db
         .insert(challenges)
         .values({
           challengerId: ctx.user.id,
-          opponentId: input.opponentId || 0,
-          status: input.opponentId ? "pending" : "active",
-          challengerSeals: initSeals(),
-          opponentSeals: initSeals(),
-          currentRound: 1,
-          challengerStreak: 0,
-          opponentStreak: 0,
-          challengerScore: 0,
-          opponentScore: 0,
-          roomCode,
-          currentCategory: input.name || undefined,
-          startedAt: input.opponentId ? null : new Date(),
+          opponentId: input.opponentId,
+          status: "pending",
+          gameState: emptyState(ctx.user.id, input.opponentId),
+          roomCode: generateRoomCode(),
         })
-        .returning({ id: challenges.id, roomCode: challenges.roomCode });
+        .returning();
+      return challenge;
+    }),
+
+  list: authedQuery.query(async ({ ctx }) => {
+    const rows = await db
+      .select()
+      .from(challenges)
+      .where(
+        eq(challenges.challengerId, ctx.user.id),
+      )
+      .orderBy(desc(challenges.createdAt));
+
+    // Also get challenges where user is opponent
+    const opponentRows = await db
+      .select()
+      .from(challenges)
+      .where(eq(challenges.opponentId, ctx.user.id))
+      .orderBy(desc(challenges.createdAt));
+
+    const all = [...rows, ...opponentRows].filter(
+      (c, i, arr) => arr.findIndex((x) => x.id === c.id) === i
+    );
+
+    // Enrich with names
+    const result = await Promise.all(
+      all.map(async (c) => ({
+        ...c,
+        challengerName: await getUserName(c.challengerId),
+        opponentName: await getUserName(c.opponentId),
+      }))
+    );
+
+    return result;
+  }),
+
+  get: authedQuery
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      const [challenge] = await db.select().from(challenges).where(eq(challenges.id, input.id)).limit(1);
+      if (!challenge) throw new TRPCError({ code: "NOT_FOUND" });
       return {
-        id: inserted[0]?.id ?? 0,
-        status: input.opponentId ? ("pending" as const) : ("active" as const),
-        roomCode: inserted[0]?.roomCode ?? "",
+        ...challenge,
+        challengerName: await getUserName(challenge.challengerId),
+        opponentName: await getUserName(challenge.opponentId),
       };
     }),
 
-  // Join an open challenge
-  join: authedQuery
-    .input(z.object({ challengeId: z.number() }))
-    .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Desafio no encontrado" });
-      if (row.challengerId === ctx.user.id)
-        throw new TRPCError({ code: "BAD_REQUEST", message: "No puedes unirte a tu propio desafio" });
-      if (row.opponentId && row.opponentId !== 0)
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Este desafio ya tiene oponente" });
-      await db
-        .update(challenges)
-        .set({ opponentId: ctx.user.id, status: "active", startedAt: new Date() })
-        .where(eq(challenges.id, input.challengeId));
-      return { success: true };
-    }),
-
-  // Join by room code
   getByRoomCode: authedQuery
     .input(z.object({ roomCode: z.string() }))
-    .query(async ({ ctx, input }) => {
-      const db = getDb();
-      const [row] = await db
-        .select()
-        .from(challenges)
-        .where(eq(challenges.roomCode, input.roomCode.toUpperCase()))
-        .limit(1);
-      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Sala no encontrada" });
-      if (row.status !== "active" && row.status !== "pending")
-        throw new TRPCError({ code: "BAD_REQUEST", message: "La sala ya no esta activa" });
-      if (row.opponentId && row.opponentId !== 0 && row.opponentId !== ctx.user.id)
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Sala llena" });
-      const challengerName = await getUserName(row.challengerId);
-      const opponentName = row.opponentId ? await getUserName(row.opponentId) : null;
-      return { ...row, challengerName, opponentName };
+    .query(async ({ input }) => {
+      const [challenge] = await db.select().from(challenges).where(eq(challenges.roomCode, input.roomCode.toUpperCase())).limit(1);
+      if (!challenge) throw new TRPCError({ code: "NOT_FOUND", message: "Codigo invalido" });
+      return challenge;
     }),
 
-  // Accept a pending challenge
   accept: authedQuery
     .input(z.object({ challengeId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Desafio no encontrado" });
-      if (row.opponentId !== ctx.user.id && row.opponentId !== 0)
-        throw new TRPCError({ code: "BAD_REQUEST", message: "No puedes aceptar este desafio" });
       await db
         .update(challenges)
-        .set({ opponentId: ctx.user.id, status: "active", startedAt: new Date() })
+        .set({ status: "accepted", acceptedAt: new Date() })
         .where(eq(challenges.id, input.challengeId));
       return { success: true };
     }),
 
-  // Get challenge state
-  get: authedQuery
+  reject: authedQuery
     .input(z.object({ challengeId: z.number() }))
-    .query(async ({ input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Desafio no encontrado" });
-      return {
-        ...row,
-        challengerName: await getUserName(row.challengerId),
-        opponentName: row.opponentId ? await getUserName(row.opponentId) : null,
-      };
+    .mutation(async ({ ctx, input }) => {
+      await db
+        .update(challenges)
+        .set({ status: "rejected" })
+        .where(eq(challenges.id, input.challengeId));
+      return { success: true };
     }),
 
-  // Get current question for a challenge's category
-  getCurrentQuestion: authedQuery
+  forfeit: authedQuery
     .input(z.object({ challengeId: z.number() }))
-    .query(async ({ input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row || row.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Desafio no activo" });
+    .mutation(async ({ ctx, input }) => {
+      const [c] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
+      if (!c) throw new TRPCError({ code: "NOT_FOUND" });
+      const isChallenger = c.challengerId === ctx.user.id;
+      await db
+        .update(challenges)
+        .set({
+          status: "forfeited",
+          winnerId: isChallenger ? c.opponentId : c.challengerId,
+          forfeitBy: ctx.user.id,
+        })
+        .where(eq(challenges.id, input.challengeId));
+      return { success: true };
+    }),
 
-      const category = row.currentCategory;
-      if (!category) throw new TRPCError({ code: "BAD_REQUEST", message: "No hay categoria activa" });
+  // ===== SERVER-AUTHORITATIVE GAME ACTIONS =====
+  action: authedQuery
+    .input(
+      z.object({
+        challengeId: z.number(),
+        action: z.object({
+          kind: z.enum(["roll_dice", "start_turn", "roulette_result", "submit_answer", "forfeit", "set_turn", "game_over"]),
+          playerId: z.number().optional(),
+          diceValue: z.number().optional(),
+          category: z.string().optional(),
+          questionId: z.number().optional(),
+          selectedOption: z.number().optional(),
+          correct: z.boolean().optional(),
+        }),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const [challenge] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
+      if (!challenge) throw new TRPCError({ code: "NOT_FOUND" });
 
-      // Get a random active question from this category, excluding the last used one
-      const pool = await db
-        .select()
-        .from(questions)
-        .where(and(eq(questions.category, category as any), eq(questions.isActive, true), ne(questions.id, row.currentQuestionId || 0)));
-
-      if (pool.length === 0) {
-        // Fallback: include the last used question if no others available
-        const fallback = await db
-          .select()
-          .from(questions)
-          .where(and(eq(questions.category, category as any), eq(questions.isActive, true)));
-        if (fallback.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "No hay preguntas para esta categoria" });
-        const q = fallback[Math.floor(Math.random() * fallback.length)];
-        return { id: q.id, question: q.question, options: [q.option1, q.option2, q.option3, q.option4], correctAnswer: q.correctAnswer, explanation: q.explanation, category: q.category, difficulty: q.difficulty };
+      // Parse current state
+      let state: GameStateDTO = challenge.gameState as GameStateDTO;
+      if (!state || !state.challengerSeals) {
+        state = emptyState(challenge.challengerId, challenge.opponentId);
       }
 
-      const q = pool[Math.floor(Math.random() * pool.length)];
-      return { id: q.id, question: q.question, options: [q.option1, q.option2, q.option3, q.option4], correctAnswer: q.correctAnswer, explanation: q.explanation, category: q.category, difficulty: q.difficulty };
+      // Process action through pure engine
+      const result = processGameAction(state, input.action as GameAction, ctx.user.id);
+
+      // Save new state
+      await db
+        .update(challenges)
+        .set({ gameState: result.state, status: result.state.winner ? "completed" : challenge.status })
+        .where(eq(challenges.id, input.challengeId));
+
+      // Update winner if game over
+      if (result.state.winner) {
+        await db
+          .update(challenges)
+          .set({ winnerId: result.state.winner, status: "completed" })
+          .where(eq(challenges.id, input.challengeId));
+      }
+
+      return { state: result.state, won: result.won || false };
     }),
 
-  // Submit answer - SERVER VALIDATED (questionId + selectedOption, NOT correct boolean)
+  // ===== GET CURRENT QUESTION FOR A CATEGORY =====
+  getCurrentQuestion: authedQuery
+    .input(z.object({ category: z.string(), excludeIds: z.array(z.number()).optional() }))
+    .query(async ({ input }) => {
+      const cond = eq(questions.category, input.category);
+      const all = await db.select().from(questions).where(cond);
+      const available = input.excludeIds?.length
+        ? all.filter((q) => !input.excludeIds!.includes(q.id))
+        : all;
+      if (available.length === 0) {
+        // fallback: return any question from this category
+        if (all.length > 0) return all[Math.floor(Math.random() * all.length)];
+        throw new TRPCError({ code: "NOT_FOUND", message: "No hay preguntas" });
+      }
+      return available[Math.floor(Math.random() * available.length)];
+    }),
+
+  // ===== SUBMIT ANSWER (server-validated) =====
   submitAnswer: authedQuery
-    .input(z.object({ challengeId: z.number(), questionId: z.number(), selectedOption: z.number() }))
+    .input(
+      z.object({
+        challengeId: z.number(),
+        questionId: z.number(),
+        selectedOption: z.number(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row || row.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Desafio no activo" });
-
-      const isChallenger = row.challengerId === ctx.user.id;
-      if (!isChallenger && row.opponentId !== ctx.user.id)
-        throw new TRPCError({ code: "FORBIDDEN", message: "No participas en este desafio" });
-
-      // Validate the answer against the actual question in DB
       const [question] = await db.select().from(questions).where(eq(questions.id, input.questionId)).limit(1);
       if (!question) throw new TRPCError({ code: "NOT_FOUND", message: "Pregunta no encontrada" });
 
       const correct = question.correctAnswer === input.selectedOption;
 
-      const mySealsKey = isChallenger ? "challengerSeals" : "opponentSeals";
-      const myStreakKey = isChallenger ? "challengerStreak" : "opponentStreak";
-      const myScoreKey = isChallenger ? "challengerScore" : "opponentScore";
-      const seals = JSON.parse((row[mySealsKey as keyof typeof row] as string) || "{}");
-
-      // Track current question as used
-      await db
-        .update(challenges)
-        .set({ currentQuestionId: input.questionId })
-        .where(eq(challenges.id, input.challengeId));
-
-      if (correct) {
-        const cat = row.currentCategory || "doctrine";
-        seals[cat] = (seals[cat] || 0) + 1;
-        const streak = ((row[myStreakKey as keyof typeof row] as number) || 0) + 1;
-        const score = ((row[myScoreKey as keyof typeof row] as number) || 0) + 1;
-        const allBroken = Object.values(seals).every((v) => (v as number) >= SEALS_TO_BREAK);
-
-        if (allBroken) {
-          await db
-            .update(challenges)
-            .set({
-              [mySealsKey]: JSON.stringify(seals),
-              [myStreakKey]: streak,
-              [myScoreKey]: score,
-              status: "completed",
-              winnerId: ctx.user.id,
-              endedAt: new Date(),
-            })
-            .where(eq(challenges.id, input.challengeId));
-          return { result: "win" as const, correct: true };
-        } else {
-          await db
-            .update(challenges)
-            .set({ [mySealsKey]: JSON.stringify(seals), [myStreakKey]: streak, [myScoreKey]: score })
-            .where(eq(challenges.id, input.challengeId));
-          return { result: "correct" as const, correct: true };
+      // Update challenge state
+      const [challenge] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
+      if (challenge) {
+        let state: GameStateDTO = challenge.gameState as GameStateDTO;
+        if (!state || !state.challengerSeals) {
+          state = emptyState(challenge.challengerId, challenge.opponentId);
         }
-      } else {
+
+        const action: GameAction = {
+          kind: "submit_answer",
+          playerId: ctx.user.id,
+          questionId: input.questionId,
+          selectedOption: input.selectedOption,
+          correct,
+        };
+
+        const result = processGameAction(state, action, ctx.user.id);
         await db
           .update(challenges)
-          .set({ [myStreakKey]: 0 })
+          .set({ gameState: result.state })
           .where(eq(challenges.id, input.challengeId));
-        return { result: "wrong" as const, correct: false };
       }
-    }),
 
-  // Forfeit
-  forfeit: authedQuery
-    .input(z.object({ challengeId: z.number() }))
-    .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      const [row] = await db.select().from(challenges).where(eq(challenges.id, input.challengeId)).limit(1);
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
-      const winnerId = row.challengerId === ctx.user.id ? row.opponentId : row.challengerId;
-      await db
-        .update(challenges)
-        .set({ status: "completed", winnerId, endedAt: new Date() })
-        .where(eq(challenges.id, input.challengeId));
-      return { winnerId };
-    }),
-
-  // Chat
-  sendMessage: authedQuery
-    .input(z.object({ challengeId: z.number(), content: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      const db = getDb();
-      await db.insert(challengeMessages).values({
-        challengeId: input.challengeId,
-        senderId: ctx.user.id,
-        senderName: ctx.user.name || "Jugador",
-        content: input.content,
-      });
-      return { success: true };
-    }),
-
-  getMessages: authedQuery
-    .input(z.object({ challengeId: z.number() }))
-    .query(async ({ input }) => {
-      const db = getDb();
-      const rows = await db
-        .select()
-        .from(challengeMessages)
-        .where(eq(challengeMessages.challengeId, input.challengeId))
-        .orderBy(desc(challengeMessages.createdAt))
-        .limit(50);
-      return rows.reverse();
+      return { correct, correctAnswer: question.correctAnswer };
     }),
 });

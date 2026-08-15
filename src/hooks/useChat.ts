@@ -27,8 +27,15 @@ function getWsUrl(): string {
   return `${protocol}//${window.location.host}`;
 }
 
+let MSG_COUNTER = 0;
+function nextId() {
+  return --MSG_COUNTER;
+}
+
 // ============================================================
-// HOOK: Chat con WebSocket (tiempo real) + tRPC (persistencia)
+// HOOK: Chat funciona CON o SIN WebSocket
+// - Si WS conectado: tiempo real
+// - Si WS desconectado: polling HTTP cada 2 segundos
 // ============================================================
 export function useChat(userId: number, userName: string) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -42,46 +49,54 @@ export function useChat(userId: number, userName: string) {
 
   userRef.current = { id: userId, name: userName };
 
+  const utils = trpc.useUtils();
+
   // tRPC: list public rooms
   const { data: publicRooms = [] } = trpc.chat.listRooms.useQuery();
 
-  // tRPC: get messages for active room
-  const { data: roomMessages = [], refetch: refetchRoomMessages } = trpc.chat.getMessages.useQuery(
+  // tRPC: get messages for active room (con polling automatico)
+  const { data: roomMessages = [] } = trpc.chat.getMessages.useQuery(
     { roomSlug: activeRoom },
-    { enabled: activeRoom !== "dm" && activeRoom.length > 0 }
+    { 
+      enabled: activeRoom !== "dm" && activeRoom.length > 0,
+      refetchInterval: connected ? false : 2000, // Poll cada 2s si WS desconectado
+    }
   );
 
-  // tRPC: get private messages
-  const { data: privateMessages = [], refetch: refetchPrivateMessages } = trpc.chat.getPrivateMessages.useQuery(
+  // tRPC: get private messages (con polling automatico)
+  const { data: privateMessages = [] } = trpc.chat.getPrivateMessages.useQuery(
     { otherUserId: privateRecipient || 0 },
-    { enabled: privateRecipient !== null && privateRecipient > 0 }
+    { 
+      enabled: privateRecipient !== null && privateRecipient > 0,
+      refetchInterval: connected ? false : 2000,
+    }
   );
 
-  // tRPC: send message mutation
+  // tRPC: send message
   const sendMsgMut = trpc.chat.sendMessage.useMutation({
     onSuccess: () => {
-      if (activeRoom !== "dm") refetchRoomMessages();
-      if (privateRecipient) refetchPrivateMessages();
+      if (activeRoom !== "dm") utils.chat.getMessages.invalidate({ roomSlug: activeRoom });
+      if (privateRecipient) utils.chat.getPrivateMessages.invalidate({ otherUserId: privateRecipient });
     },
   });
 
   // tRPC: create room
   const createRoomMut = trpc.chat.createRoom.useMutation({
-    onSuccess: () => {
-      trpc.useUtils().chat.listRooms.invalidate();
-    },
+    onSuccess: () => utils.chat.listRooms.invalidate(),
   });
 
-  // Load persisted messages into state
+  // Cargar mensajes de la DB en el estado
   useEffect(() => {
     if (activeRoom === "dm" && privateRecipient) {
-      setMessages(privateMessages.map(m => ({ ...m, createdAt: new Date(m.createdAt) })));
+      const msgs = privateMessages.map(m => ({ ...m, createdAt: new Date(m.createdAt) }));
+      setMessages(msgs);
     } else if (activeRoom !== "dm") {
-      setMessages(roomMessages.map(m => ({ ...m, createdAt: new Date(m.createdAt) })));
+      const msgs = roomMessages.map(m => ({ ...m, createdAt: new Date(m.createdAt) }));
+      setMessages(msgs);
     }
   }, [roomMessages, privateMessages, activeRoom, privateRecipient]);
 
-  // ---- WEBSOCKET ----
+  // ---- WEBSOCKET (opcional - para tiempo real) ----
   useEffect(() => {
     if (userId <= 0) return;
     const wsUrl = getWsUrl();
@@ -110,16 +125,21 @@ export function useChat(userId: number, userName: string) {
             switch (data.type) {
               case "chat-message": {
                 if (data.message) {
-                  const msg: ChatMsg = {
-                    id: Date.now(),
+                  const newMsg: ChatMsg = {
+                    id: data.message.id || Date.now(),
                     senderId: data.message.senderId,
                     senderName: data.message.senderName,
                     content: data.message.content,
-                    createdAt: new Date(data.message.timestamp),
+                    createdAt: new Date(data.message.timestamp || Date.now()),
                   };
                   setMessages(prev => {
-                    if (prev.some(m => m.id === msg.id)) return prev;
-                    return [...prev, msg];
+                    const dup = prev.find(m => 
+                      m.senderId === newMsg.senderId && 
+                      m.content === newMsg.content &&
+                      Math.abs(new Date(m.createdAt).getTime() - newMsg.createdAt.getTime()) < 3000
+                    );
+                    if (dup) return prev;
+                    return [...prev, newMsg];
                   });
                 }
                 break;
@@ -128,9 +148,6 @@ export function useChat(userId: number, userName: string) {
                 if (data.users) {
                   setOnlineUsers(data.users.map((u: any) => ({ id: u.id, name: u.name })));
                 }
-                break;
-              }
-              case "presence": {
                 break;
               }
               case "ping": {
@@ -148,7 +165,7 @@ export function useChat(userId: number, userName: string) {
             reconnectTimer.current = setTimeout(() => {
               reconnectTimer.current = null;
               connect();
-            }, 3000);
+            }, 5000);
           }
         };
         ws.onerror = () => ws?.close();
@@ -160,62 +177,76 @@ export function useChat(userId: number, userName: string) {
     connect();
     return () => {
       closed = true;
-      if (reconnectTimer.current) {
-        clearTimeout(reconnectTimer.current);
-        reconnectTimer.current = null;
-      }
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
       ws?.close();
     };
   }, [userId, userName]);
 
-  // Join a different room via WS
+  // Cambiar de sala
   const joinRoom = useCallback((roomSlug: string) => {
     setActiveRoom(roomSlug);
     setPrivateRecipient(null);
+    setMessages([]);
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "join-room",
         roomId: roomSlug,
-        senderId: userRef.current.id,
-        senderName: userRef.current.name,
+        senderId: userRef.current.id || 1,
+        senderName: userRef.current.name || "Invitado",
       }));
     }
-    refetchRoomMessages();
-  }, [refetchRoomMessages]);
+  }, []);
 
-  // Open private conversation
+  // Chat privado
   const openPrivateChat = useCallback((recipientId: number) => {
     setActiveRoom("dm");
     setPrivateRecipient(recipientId);
-    refetchPrivateMessages();
-  }, [refetchPrivateMessages]);
+    setMessages([]);
+  }, []);
 
-  // Send message (WS + persist to DB)
+  // ============================================================
+  // SEND: Optimistic update + tRPC + WS
+  // ============================================================
   const sendMessage = useCallback((content: string) => {
-    if (!content.trim()) return;
+    const trimmed = content.trim();
+    if (!trimmed) return;
 
     const roomSlug = activeRoom === "dm" ? "dm" : activeRoom;
     const isPrivate = activeRoom === "dm";
+    const senderId = userRef.current.id || 1;
+    const senderName = userRef.current.name || "Invitado";
 
-    sendMsgMut.mutate({
-      roomSlug,
-      content: content.trim(),
-      isPrivate,
-      recipientId: isPrivate ? privateRecipient || undefined : undefined,
-    });
+    // 1. Mostrar INMEDIATAMENTE
+    const localMsg: ChatMsg = {
+      id: nextId(),
+      senderId,
+      senderName,
+      content: trimmed,
+      createdAt: new Date(),
+    };
+    setMessages(prev => [...prev, localMsg]);
 
+    // 2. Enviar por WS si conectado
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "chat-message",
         roomId: roomSlug,
-        senderId: userRef.current.id,
-        senderName: userRef.current.name,
-        content: content.trim(),
+        senderId,
+        senderName,
+        content: trimmed,
       }));
     }
+
+    // 3. Persistir en DB via tRPC (siempre funciona, aunque WS este caido)
+    sendMsgMut.mutate({
+      roomSlug,
+      content: trimmed,
+      isPrivate,
+      recipientId: isPrivate ? privateRecipient || undefined : undefined,
+    });
   }, [activeRoom, privateRecipient, sendMsgMut]);
 
-  // Create room
+  // Crear sala
   const createRoom = useCallback((name: string, isPrivate: boolean) => {
     return createRoomMut.mutateAsync({ name, isPrivate });
   }, [createRoomMut]);
@@ -231,7 +262,5 @@ export function useChat(userId: number, userName: string) {
     openPrivateChat,
     sendMessage,
     createRoom,
-    setActiveRoom,
-    setPrivateRecipient,
   };
 }

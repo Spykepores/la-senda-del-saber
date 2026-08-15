@@ -1,310 +1,219 @@
-import { useState, useEffect, useCallback } from "react";
-import { useChallengeSealsGame, SEALS_TO_BREAK } from "./useChallengeSealsGame";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { trpc } from "@/providers/trpc";
 
-export type GamePhase = "waiting_opponent" | "my_turn" | "opponent_turn" | "finished";
+// ============================================================
+// DUEL HOOKS - tRPC + WebSocket Bridge
+// ============================================================
 
-export interface LocalChallenge {
-  id: number;
-  challengerId: number;
-  challengerName: string;
-  opponentId: number;
-  opponentName: string;
-  status: "pending" | "active" | "completed" | "cancelled";
-  winnerId?: number | null;
-  createdAt: number;
-  roomName?: string;
-  syncCode?: string;
-  roomCode?: string | null;
+function getWsUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const isDev = window.location.hostname === "localhost";
+  if (isDev) return `${protocol}//localhost:3001`;
+  return `${protocol}//${window.location.host}`;
 }
 
-// ==========================================
-// GAMEPLAY (usa WebSocket + tRPC)
-// ==========================================
-export function useDuel(challengeId: number, userId: number) {
-  const game = useChallengeSealsGame(challengeId, userId);
-  const myB = game.myState ? Object.values(game.myState.seals).filter(v => v >= SEALS_TO_BREAK).length : 0;
-  const oppB = game.oppState ? Object.values(game.oppState.seals).filter(v => v >= SEALS_TO_BREAK).length : 0;
-
-  let phase: GamePhase = "waiting_opponent";
-  if (game.isFinished) phase = "finished";
-  else if (game.isMyTurn && game.phase === "waiting") phase = "my_turn";
-  else if (game.isMyTurn && (game.phase === "question" || game.phase === "roulette" || game.phase === "result")) phase = "my_turn";
-  else if (!game.isMyTurn && !game.isFinished) phase = "opponent_turn";
-
-  return {
-    state: game.state as any, phase, isLoading: !game.state,
-    myBroken: myB, oppBroken: oppB,
-    submitAnswer: game.submitAnswer, forfeit: game.forfeit,
-    timeLeft: game.timeLeft, timerPct: game.timerPct, timerColor: game.timerColor,
-    currentCategory: game.currentCategory,
-    startTurn: game.startTurn, onRouletteComplete: game.onRouletteComplete,
-    continueAfterCorrect: game.continueAfterCorrect,
-    isMyTurn: game.isMyTurn, isFinished: game.isFinished, gamePhase: game.phase,
-    diceRolled: game.diceRolled, myDice: game.myDice, oppDice: game.oppDice,
-    diceWinnerId: game.diceWinnerId, rollDice: game.rollDice,
-    question: game.question,
-  };
+/* ---- Load single challenge ---- */
+export function useDuel(challengeId?: number) {
+  const { data, isLoading } = trpc.duel.get.useQuery(
+    { id: challengeId || 0 },
+    { enabled: !!challengeId, refetchInterval: 2000 }
+  );
+  return { duel: data, isLoading };
 }
 
-// ==========================================
-// LIST ALL CHALLENGES (tRPC)
-// ==========================================
+/* ---- List all my challenges ---- */
 export function useDuelList() {
   const { data, isLoading, refetch } = trpc.duel.list.useQuery();
-  return { data: data || [], isLoading, reload: refetch };
+  return { duels: data || [], isLoading, refetch };
 }
 
-// ==========================================
-// PUBLIC CHALLENGES (tRPC)
-// ==========================================
-export function usePublicChallenges(_myId?: number) {
-  const { data } = trpc.duel.listPublic.useQuery();
-  return data || [];
+/* ---- List public/open challenges (pending) ---- */
+export function usePublicChallenges() {
+  const { data: allDuels = [] } = useDuelList();
+  const publicChallenges = allDuels.filter((c) => c.status === "pending");
+  return { publicChallenges, isLoading: false };
 }
 
-// ==========================================
-// MY CHALLENGES (tRPC)
-// ==========================================
-export function useMyChallenges(_myId?: number) {
-  const { data } = trpc.duel.listMine.useQuery();
-  return data || [];
+/* ---- My active challenges ---- */
+export function useMyChallenges() {
+  const { data: allDuels = [] } = useDuelList();
+  const myChallenges = allDuels.filter((c) => c.status !== "completed" && c.status !== "rejected");
+  return { myChallenges, isLoading: false };
 }
 
-// ==========================================
-// CREATE CHALLENGE (tRPC)
-// ==========================================
+/* ---- Create a challenge ---- */
 export function useCreateDuel() {
   const utils = trpc.useUtils();
-  const mutation = trpc.duel.create.useMutation({
-    onSuccess: () => {
-      utils.duel.list.invalidate();
-      utils.duel.listPublic.invalidate();
-      utils.duel.listMine.invalidate();
-    },
+  const { mutateAsync, isPending } = trpc.duel.create.useMutation({
+    onSuccess: () => utils.duel.list.invalidate(),
   });
-
-  return {
-    mutateAsync: mutation.mutateAsync,
-    isPending: mutation.isPending,
-  };
+  return { createDuel: mutateAsync, isPending };
 }
 
-// ==========================================
-// JOIN CHALLENGE (tRPC)
-// ==========================================
-export function useJoinDuel() {
-  const utils = trpc.useUtils();
-  const mutation = trpc.duel.join.useMutation({
-    onSuccess: () => {
-      utils.duel.list.invalidate();
-      utils.duel.listMine.invalidate();
-      utils.duel.listPublic.invalidate();
-    },
-  });
-
-  return {
-    mutateAsync: mutation.mutateAsync,
-    isPending: mutation.isPending,
-  };
-}
-
-// ==========================================
-// ACCEPT CHALLENGE (tRPC)
-// ==========================================
-export function useAcceptDuel() {
-  const utils = trpc.useUtils();
-  const mutation = trpc.duel.accept.useMutation({
-    onSuccess: () => {
-      utils.duel.list.invalidate();
-      utils.duel.listMine.invalidate();
-    },
-  });
-
-  return {
-    mutateAsync: mutation.mutateAsync,
-    isPending: mutation.isPending,
-  };
-}
-
-// ==========================================
-// REJECT CHALLENGE (tRPC)
-// ==========================================
-export function useRejectDuel() {
-  const utils = trpc.useUtils();
-  const mutation = trpc.duel.forfeit.useMutation({
-    onSuccess: () => {
-      utils.duel.list.invalidate();
-      utils.duel.listMine.invalidate();
-    },
-  });
-
-  return {
-    mutateAsync: async (challengeId: number) => {
-      await mutation.mutateAsync({ challengeId });
-    },
-    isPending: mutation.isPending,
-  };
-}
-
-// ==========================================
-// GET SINGLE CHALLENGE (tRPC)
-// ==========================================
-export function useChallenge(id: number) {
-  const { data, isLoading } = trpc.duel.get.useQuery(
-    { challengeId: id },
-    { enabled: id > 0 }
-  );
-
-  const challenge: LocalChallenge | undefined = data
-    ? {
-        id: data.id,
-        challengerId: data.challengerId,
-        challengerName: data.challengerName || "",
-        opponentId: data.opponentId || 0,
-        opponentName: data.opponentName || "",
-        status: data.status,
-        winnerId: data.winnerId,
-        createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
-        roomName: data.currentCategory || undefined,
-        syncCode: data.roomCode || undefined,
-        roomCode: data.roomCode,
-      }
-    : undefined;
-
-  return { data: challenge, isLoading };
-}
-
-// ==========================================
-// JOIN BY CODE (tRPC)
-// ==========================================
+/* ---- Join a challenge by room code ---- */
 export function useJoinByCode() {
   const utils = trpc.useUtils();
-  const [isPending, setIsPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [roomCode, setRoomCode] = useState("");
-  const joinMut = trpc.duel.join.useMutation({
-    onSuccess: () => {
-      utils.duel.list.invalidate();
-      utils.duel.listMine.invalidate();
-    },
+  const { mutateAsync, isPending } = trpc.duel.getByRoomCode.useMutation({
+    onSuccess: () => utils.duel.list.invalidate(),
   });
-  const { data: foundChallenge } = trpc.duel.getByRoomCode.useQuery(
-    { roomCode: roomCode.toUpperCase() },
-    { enabled: roomCode.length === 6 }
-  );
-
-  const join = useCallback(async (code: string) => {
-    setIsPending(true);
-    setError(null);
-    try {
-      setRoomCode(code);
-      // Wait a tick for the query to potentially resolve
-      await new Promise(r => setTimeout(r, 100));
-      // Use direct mutation approach
-      const challenge = foundChallenge;
-      if (!challenge) {
-        // Try direct API call as fallback
-        try {
-          const result = await utils.client.duel.getByRoomCode.query({ roomCode: code.toUpperCase() });
-          if (result && (!result.opponentId || result.opponentId === 0)) {
-            await joinMut.mutateAsync({ challengeId: result.id });
-            setIsPending(false);
-            return result;
-          }
-        } catch { /* */ }
-        setError("Codigo no encontrado o sala llena");
-        setIsPending(false);
-        return null;
-      }
-      if (challenge.opponentId && challenge.opponentId !== 0) { setError("Sala llena"); setIsPending(false); return null; }
-      await joinMut.mutateAsync({ challengeId: challenge.id });
-      setIsPending(false);
-      return challenge;
-    } catch (e: any) {
-      setError(e.message || "Error al unirse");
-      setIsPending(false);
-      return null;
-    }
-  }, [joinMut, foundChallenge]);
-
-  return { join, isPending, error };
+  return { joinByCode: mutateAsync, isPending };
 }
 
-// ==========================================
-// CHAT (tRPC)
-// ==========================================
-export function useChallengeChat(challengeId: number) {
-  const { data: messages = [] } = trpc.duel.getMessages.useQuery({ challengeId });
-  const sendMut = trpc.duel.sendMessage.useMutation({
-    onSuccess: () => {
-      trpc.useUtils().duel.getMessages.invalidate({ challengeId });
-    },
+/* ---- Accept a challenge ---- */
+export function useAcceptDuel() {
+  const utils = trpc.useUtils();
+  const { mutateAsync, isPending } = trpc.duel.accept.useMutation({
+    onSuccess: () => utils.duel.list.invalidate(),
   });
-
-  const send = useCallback((_senderId: number, _senderName: string, content: string) => {
-    sendMut.mutate({ challengeId, content });
-  }, [sendMut, challengeId]);
-
-  return { messages, send };
+  return { acceptDuel: mutateAsync, isPending };
 }
 
-// ==========================================
-// GLOBAL CHAT (WebSocket)
-// ==========================================
-export function useGlobalChat() {
-  const { messages, send, connected } = useWebSocketChat("global");
-
-  const sendGlobal = useCallback((_: number, __: string, content: string) => {
-    send(_, __, content);
-  }, [send]);
-
-  return { messages, send: sendGlobal, connected };
+/* ---- Reject a challenge ---- */
+export function useRejectDuel() {
+  const utils = trpc.useUtils();
+  const { mutateAsync, isPending } = trpc.duel.reject.useMutation({
+    onSuccess: () => utils.duel.list.invalidate(),
+  });
+  return { rejectDuel: mutateAsync, isPending };
 }
 
-// ==========================================
-// ONLINE PLAYERS (localStorage fallback)
-// ==========================================
-export function useOnlinePlayers(userId: number, userName: string) {
-  const [players, setPlayers] = useState<any[]>([]);
+/* ---- Get challenge details ---- */
+export function useChallenge(challengeId?: number) {
+  return useDuel(challengeId);
+}
+
+// ==========================================================
+// CHAT: tRPC + WebSocket dual system
+// ==========================================================
+export function useChallengeChat(challengeId?: number) {
+  const [messages, setMessages] = useState<any[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    // Usar polling de localStorage para compatibilidad
-    const heartbeat = () => {
+    if (!challengeId) return;
+    const ws = new WebSocket(getWsUrl());
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setWsConnected(true);
+      ws.send(JSON.stringify({ type: "join-room", roomId: `duel_${challengeId}` }));
+    };
+
+    ws.onmessage = (event) => {
       try {
-        const u = JSON.parse(localStorage.getItem("senda_local_user") || "{}");
-        if (u.id) {
-          const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
-          const idx = all.findIndex((p: any) => p.id === u.id);
-          if (idx >= 0) all[idx] = { id: u.id, name: u.name || "Jugador", lastSeen: Date.now(), online: true };
-          else all.push({ id: u.id, name: u.name || "Jugador", lastSeen: Date.now(), online: true });
-          localStorage.setItem("senda_online_players", JSON.stringify(all));
+        const data = JSON.parse(event.data);
+        if (data.type === "chat-message") {
+          setMessages((prev) => [...prev, data.message]);
         }
       } catch { /* */ }
     };
-    heartbeat();
-    const interval = setInterval(heartbeat, 5000);
 
-    const loadPlayers = () => {
+    ws.onclose = () => setWsConnected(false);
+    return () => ws.close();
+  }, [challengeId]);
+
+  const sendMessage = useCallback((content: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "chat-message", roomId: `duel_${challengeId}`, content }));
+    }
+  }, [challengeId]);
+
+  return { messages, sendMessage, wsConnected };
+}
+
+export function useGlobalChat() {
+  return useChallengeChat(0);
+}
+
+// ==========================================================
+// GLOBAL CHAT (WebSocket)
+// ==========================================================
+export function useWebSocketChat(channel: string) {
+  const [messages, setMessages] = useState<any[]>([]);
+  const [onlineCount, setOnlineCount] = useState(0);
+  const [connected, setConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
       try {
-        const cutoff = Date.now() - 30000;
-        const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
-        setPlayers(all.filter((p: any) => p.id !== userId && p.online && p.lastSeen > cutoff));
-      } catch { setPlayers([]); }
+        ws = new WebSocket(getWsUrl());
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          setConnected(true);
+          ws!.send(JSON.stringify({ type: "join-room", roomId: channel }));
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            switch (data.type) {
+              case "chat-message": setMessages((prev) => [...prev, data.message]); break;
+              case "room-users": setOnlineCount(data.users?.length || 0); break;
+              case "ping": ws?.send(JSON.stringify({ type: "pong" })); break;
+            }
+          } catch { /* */ }
+        };
+
+        ws.onclose = () => {
+          setConnected(false);
+          wsRef.current = null;
+          if (!closed && !reconnectTimer.current) {
+            reconnectTimer.current = setTimeout(() => { reconnectTimer.current = null; connect(); }, 3000);
+          }
+        };
+
+        ws.onerror = () => ws?.close();
+      } catch { setConnected(false); }
     };
-    loadPlayers();
-    const poll = setInterval(loadPlayers, 3000);
 
+    connect();
     return () => {
-      clearInterval(interval);
-      clearInterval(poll);
+      closed = true;
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+      ws?.close();
+    };
+  }, [channel]);
+
+  const sendMessage = useCallback((content: string, _senderName?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "chat-message", roomId: channel, content }));
+    }
+  }, [channel]);
+
+  return { messages, onlineCount, connected, sendMessage };
+}
+
+// ==========================================
+// ONLINE PLAYERS (tRPC - real users from database)
+// ==========================================
+export function useOnlinePlayers(userId: number, userName: string) {
+  const { data: allUsers = [] } = trpc.users.list.useQuery();
+
+  // Heartbeat: marcar que este usuario esta activo en localStorage
+  useEffect(() => {
+    const beat = () => {
       try {
-        const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
-        const idx = all.findIndex((p: any) => p.id === userId);
-        if (idx >= 0) { all[idx] = { ...all[idx], online: false, lastSeen: Date.now() }; localStorage.setItem("senda_online_players", JSON.stringify(all)); }
+        const u = { id: userId, name: userName, lastSeen: Date.now() };
+        localStorage.setItem("senda_online_heartbeat", JSON.stringify(u));
       } catch { /* */ }
     };
+    beat();
+    const interval = setInterval(beat, 10000);
+    return () => clearInterval(interval);
   }, [userId, userName]);
+
+  // Filtrar: excluir al usuario actual y mostrar todos los demas registrados
+  const players = allUsers
+    .filter((u) => u.id !== userId)
+    .map((u) => ({ id: u.id, name: u.name || `Usuario #${u.id}`, online: true }));
 
   return players;
 }
