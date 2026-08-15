@@ -1,1 +1,19 @@
-services:  - type: web    name: la-senda-del-saber    runtime: node    plan: free    region: oregon    buildCommand: npm install && npm run build    startCommand: npm start    healthCheckPath: /api/trpc/ping    envVars:      - key: NODE_ENV        value: production      - key: DATABASE_URL        sync: false # Configurar en el dashboard de Render      - key: APP_SECRET        sync: false      - key: OWNER_UNION_ID        sync: false      - key: APP_ID        sync: false
+services:
+  - type: web
+    name: la-senda-del-saber
+    runtime: node
+    plan: free
+    buildCommand: npm install --legacy-peer-deps && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/trpc/ping
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: postgresql://neondb_owner:npg_TbxoQlNuc6n2@ep-quiet-paper-aj53ynhu-pooler.c-3.us-east-2.aws.neon.tech/neondb?channel_binding=require&sslmode=require
+      - key: APP_SECRET
+        value: Jdj9W14BCjkAsLOARCtISWvoTUAlLYMy
+      - key: OWNER_UNION_ID
+        value: d6pjqrhtoom2guvap6c0
+      - key: APP_ID
+        value: 19e8bd8a-3e72-830b-8000-0000ab4dbccb
