@@ -1,47 +1,81 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useChallengeSealsGame, SEALS_TO_BREAK } from "./useChallengeSealsGame";
 import { trpc } from "@/providers/trpc";
+import { useWebSocketChat } from "./useWebSocketChat";
 
-// ============================================================
-// DUEL HOOKS - tRPC + WebSocket Bridge
-// ============================================================
+export type GamePhase = "waiting_opponent" | "my_turn" | "opponent_turn" | "finished";
 
-function getWsUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const isDev = window.location.hostname === "localhost";
-  if (isDev) return `${protocol}//localhost:3001`;
-  return `${protocol}//${window.location.host}`;
+export interface LocalChallenge {
+  id: number;
+  challengerId: number;
+  challengerName: string;
+  opponentId: number;
+  opponentName: string;
+  status: "pending" | "active" | "completed" | "cancelled";
+  winnerId?: number | null;
+  createdAt: number;
+  roomName?: string;
+  syncCode?: string;
+  roomCode?: string | null;
 }
 
-/* ---- Load single challenge ---- */
-export function useDuel(challengeId?: number) {
-  const { data, isLoading } = trpc.duel.get.useQuery(
-    { id: challengeId || 0 },
-    { enabled: !!challengeId, refetchInterval: 2000 }
-  );
-  return { duel: data, isLoading };
+export interface DuelState {
+  challengeId: number;
+  phase: GamePhase;
+  currentPlayer: number;
+  challengerSeals: number[];
+  opponentSeals: number[];
+  challengerScore: number;
+  opponentScore: number;
+  currentCategory: string | null;
+  diceValue: number | null;
+  round: number;
+  timer: number;
+  timerActive: boolean;
+  winner: number | null;
+  forfeitBy: number | null;
 }
 
-/* ---- List all my challenges ---- */
-export function useDuelList() {
+// LocalStorage helpers
+function getLocalChallenges(): LocalChallenge[] {
+  try { return JSON.parse(localStorage.getItem("senda_challenges") || "[]"); } catch { return []; }
+}
+function saveLocalChallenges(list: LocalChallenge[]) {
+  localStorage.setItem("senda_challenges", JSON.stringify(list));
+}
+function getLocalUser() {
+  try { return JSON.parse(localStorage.getItem("senda_local_user") || "null"); } catch { return null; }
+}
+
+// ==========================================================
+// DUEL HOOKS
+// ==========================================================
+export function useDuel(userId: number) {
   const { data, isLoading, refetch } = trpc.duel.list.useQuery();
-  return { duels: data || [], isLoading, refetch };
+  const myId = userId;
+  const myChallenges =
+    data?.filter(
+      (c) =>
+        c.challengerId === myId ||
+        c.opponentId === myId
+    ) || [];
+
+  return {
+    challenges: myChallenges,
+    isLoading,
+    refetch,
+    myId,
+  };
 }
 
-/* ---- List public/open challenges (pending) ---- */
-export function usePublicChallenges() {
-  const { data: allDuels = [] } = useDuelList();
-  const publicChallenges = allDuels.filter((c) => c.status === "pending");
-  return { publicChallenges, isLoading: false };
+export function useChallenge(challengeId: number) {
+  const { data, isLoading } = trpc.duel.get.useQuery(
+    { id: challengeId },
+    { enabled: challengeId > 0 }
+  );
+  return { challenge: data, isLoading };
 }
 
-/* ---- My active challenges ---- */
-export function useMyChallenges() {
-  const { data: allDuels = [] } = useDuelList();
-  const myChallenges = allDuels.filter((c) => c.status !== "completed" && c.status !== "rejected");
-  return { myChallenges, isLoading: false };
-}
-
-/* ---- Create a challenge ---- */
 export function useCreateDuel() {
   const utils = trpc.useUtils();
   const { mutateAsync, isPending } = trpc.duel.create.useMutation({
@@ -50,7 +84,6 @@ export function useCreateDuel() {
   return { createDuel: mutateAsync, isPending };
 }
 
-/* ---- Join a challenge by room code ---- */
 export function useJoinByCode() {
   const utils = trpc.useUtils();
   const { mutateAsync, isPending } = trpc.duel.getByRoomCode.useMutation({
@@ -59,7 +92,6 @@ export function useJoinByCode() {
   return { joinByCode: mutateAsync, isPending };
 }
 
-/* ---- Accept a challenge ---- */
 export function useAcceptDuel() {
   const utils = trpc.useUtils();
   const { mutateAsync, isPending } = trpc.duel.accept.useMutation({
@@ -68,7 +100,6 @@ export function useAcceptDuel() {
   return { acceptDuel: mutateAsync, isPending };
 }
 
-/* ---- Reject a challenge ---- */
 export function useRejectDuel() {
   const utils = trpc.useUtils();
   const { mutateAsync, isPending } = trpc.duel.reject.useMutation({
@@ -77,13 +108,62 @@ export function useRejectDuel() {
   return { rejectDuel: mutateAsync, isPending };
 }
 
-/* ---- Get challenge details ---- */
-export function useChallenge(challengeId?: number) {
-  return useDuel(challengeId);
+export function useForfeitDuel() {
+  const utils = trpc.useUtils();
+  const { mutateAsync, isPending } = trpc.duel.forfeit.useMutation({
+    onSuccess: () => utils.duel.list.invalidate(),
+  });
+  return { forfeitDuel: mutateAsync, isPending };
 }
 
 // ==========================================================
-// CHAT: tRPC + WebSocket dual system
+// ONLINE PLAYERS
+// ==========================================================
+export function useOnlinePlayers(userId: number, userName: string) {
+  const [players, setPlayers] = useState<any[]>([]);
+
+  useEffect(() => {
+    const heartbeat = () => {
+      try {
+        const u = JSON.parse(localStorage.getItem("senda_local_user") || "{}");
+        if (u.id) {
+          const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
+          const idx = all.findIndex((p: any) => p.id === u.id);
+          if (idx >= 0) all[idx] = { id: u.id, name: u.name || "Jugador", lastSeen: Date.now(), online: true };
+          else all.push({ id: u.id, name: u.name || "Jugador", lastSeen: Date.now(), online: true });
+          localStorage.setItem("senda_online_players", JSON.stringify(all));
+        }
+      } catch { /* */ }
+    };
+    heartbeat();
+    const interval = setInterval(heartbeat, 5000);
+
+    const loadPlayers = () => {
+      try {
+        const cutoff = Date.now() - 30000;
+        const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
+        setPlayers(all.filter((p: any) => p.id !== userId && p.online && p.lastSeen > cutoff));
+      } catch { setPlayers([]); }
+    };
+    loadPlayers();
+    const poll = setInterval(loadPlayers, 3000);
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(poll);
+      try {
+        const all = JSON.parse(localStorage.getItem("senda_online_players") || "[]");
+        const idx = all.findIndex((p: any) => p.id === userId);
+        if (idx >= 0) { all[idx] = { ...all[idx], online: false, lastSeen: Date.now() }; localStorage.setItem("senda_online_players", JSON.stringify(all)); }
+      } catch { /* */ }
+    };
+  }, [userId, userName]);
+
+  return players;
+}
+
+// ==========================================================
+// CHAT: WS + tRPC dual system
 // ==========================================================
 export function useChallengeChat(challengeId?: number) {
   const [messages, setMessages] = useState<any[]>([]);
@@ -123,118 +203,14 @@ export function useChallengeChat(challengeId?: number) {
 }
 
 export function useGlobalChat() {
-  return useChallengeChat(0);
+  const { messages, send, connected } = useWebSocketChat("global");
+  return { messages, sendMessage: send, wsConnected: connected };
 }
 
 // ==========================================================
-// GLOBAL CHAT (WebSocket)
+// EXPORT/IMPORT
 // ==========================================================
-export function useWebSocketChat(channel: string) {
-  const [messages, setMessages] = useState<any[]>([]);
-  const [onlineCount, setOnlineCount] = useState(0);
-  const [connected, setConnected] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let closed = false;
-
-    const connect = () => {
-      if (closed) return;
-      try {
-        ws = new WebSocket(getWsUrl());
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          setConnected(true);
-          ws!.send(JSON.stringify({ type: "join-room", roomId: channel }));
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            switch (data.type) {
-              case "chat-message": setMessages((prev) => [...prev, data.message]); break;
-              case "room-users": setOnlineCount(data.users?.length || 0); break;
-              case "ping": ws?.send(JSON.stringify({ type: "pong" })); break;
-            }
-          } catch { /* */ }
-        };
-
-        ws.onclose = () => {
-          setConnected(false);
-          wsRef.current = null;
-          if (!closed && !reconnectTimer.current) {
-            reconnectTimer.current = setTimeout(() => { reconnectTimer.current = null; connect(); }, 3000);
-          }
-        };
-
-        ws.onerror = () => ws?.close();
-      } catch { setConnected(false); }
-    };
-
-    connect();
-    return () => {
-      closed = true;
-      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
-      ws?.close();
-    };
-  }, [channel]);
-
-  const sendMessage = useCallback((content: string, _senderName?: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "chat-message", roomId: channel, content }));
-    }
-  }, [channel]);
-
-  return { messages, onlineCount, connected, sendMessage };
-}
-
-// ==========================================
-// ONLINE PLAYERS (tRPC - real users from database)
-// ==========================================
-export function useOnlinePlayers(userId: number, userName: string) {
-  const { data: allUsers = [] } = trpc.users.list.useQuery();
-
-  // Heartbeat: marcar que este usuario esta activo en localStorage
-  useEffect(() => {
-    const beat = () => {
-      try {
-        const u = { id: userId, name: userName, lastSeen: Date.now() };
-        localStorage.setItem("senda_online_heartbeat", JSON.stringify(u));
-      } catch { /* */ }
-    };
-    beat();
-    const interval = setInterval(beat, 10000);
-    return () => clearInterval(interval);
-  }, [userId, userName]);
-
-  // Filtrar: excluir al usuario actual y mostrar todos los demas registrados
-  const players = allUsers
-    .filter((u) => u.id !== userId)
-    .map((u) => ({ id: u.id, name: u.name || `Usuario #${u.id}`, online: true }));
-
-  return players;
-}
-
-// ==========================================
-// FORFEIT (tRPC + WebSocket)
-// ==========================================
-export function useForfeitDuel() {
-  const forfeitMut = trpc.duel.forfeit.useMutation();
-
-  const mutate = useCallback((challengeId: number) => {
-    forfeitMut.mutate({ challengeId });
-  }, [forfeitMut]);
-
-  return { mutate, isPending: forfeitMut.isPending };
-}
-
-// ==========================================
-// Export/Import (deprecated - keep for compatibility)
-// ==========================================
-export function exportChallengeState(_challengeId?: number): string {
+export function exportChallengeState(challengeId?: number): string {
   return "";
 }
 
@@ -242,9 +218,8 @@ export function importChallengeState(_json?: string): { success: boolean; challe
   return { success: false, error: "Usa el sistema online" };
 }
 
-// Lazy import to avoid circular dependency
-function useWebSocketChat(channel: string) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { useWebSocketChat: hook } = require("./useWebSocketChat");
-  return hook(channel);
+function getWsUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (window.location.hostname === "localhost") return `${protocol}//localhost:3001`;
+  return `${protocol}//${window.location.host}`;
 }
