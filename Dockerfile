@@ -1,9 +1,9 @@
-# Dockerfile para La Senda del Saber
+# Dockerfile para La Senda del Saber - v2 (cache bust)
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Copiar package.json e instalar dependencias (usamos npm install, no npm ci)
+# Copiar solo package.json (no package-lock.json)
 COPY package.json ./
 RUN npm install
 
