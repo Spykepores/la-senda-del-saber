@@ -1,11 +1,15 @@
-# Dockerfile para La Senda del Saber - v2 (cache bust)
+# Dockerfile para La Senda del Saber - v3 (full cache bust 2026-08-15)
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Copiar solo package.json (no package-lock.json)
+# Forzar rebuild limpio sin cache
+ARG CACHE_BUST=3
+RUN npm cache clean --force
+
+# Copiar package.json e instalar con legacy peer deps
 COPY package.json ./
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 # Copiar todo el codigo
 COPY . .
