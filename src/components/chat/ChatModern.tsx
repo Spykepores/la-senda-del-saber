@@ -3,7 +3,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { trpc } from "@/providers/trpc";
 import { useChat } from "@/hooks/useChat";
 import { useGlobalChat } from "@/hooks/useDuel";
-import type { ChatMessage } from "@/hooks/useChat";
+import type { ChatMsg } from "@/hooks/useChat";
 import { Link } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,11 +47,11 @@ function getAvatarColor(id: number) {
     "bg-teal-600", "bg-cyan-600", "bg-sky-600", "bg-indigo-600",
     "bg-violet-600", "bg-purple-600", "bg-fuchsia-600", "bg-rose-600",
   ];
-  return colors[id % colors.length];
+  return colors[Math.abs(id) % colors.length];
 }
 
-function formatChatTime(dateStr: string) {
-  const d = new Date(dateStr);
+function formatChatTime(dateStr: string | Date) {
+  const d = typeof dateStr === "string" ? new Date(dateStr) : dateStr;
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffMins = Math.floor(diffMs / 60000);
@@ -64,16 +64,18 @@ function formatChatTime(dateStr: string) {
   return format(d, "dd/MM", { locale: es });
 }
 
-function formatMessageTime(dateStr: string) {
-  return format(new Date(dateStr), "HH:mm", { locale: es });
+function formatMessageTime(dateStr: string | Date) {
+  const d = typeof dateStr === "string" ? new Date(dateStr) : dateStr;
+  return format(d, "HH:mm", { locale: es });
 }
 
-function formatMessageDate(dateStr: string) {
-  return format(new Date(dateStr), "EEEE d MMMM", { locale: es });
+function formatMessageDate(dateStr: string | Date) {
+  const d = typeof dateStr === "string" ? new Date(dateStr) : dateStr;
+  return format(d, "EEEE d MMMM", { locale: es });
 }
 
-function groupMessagesByDate(messages: ChatMessage[]) {
-  const groups: { date: string; items: ChatMessage[] }[] = [];
+function groupMessagesByDate(messages: ChatMsg[]) {
+  const groups: { date: string; items: ChatMsg[] }[] = [];
   let currentDate = "";
   for (const msg of messages) {
     const dateKey = format(new Date(msg.createdAt), "yyyy-MM-dd", { locale: es });
@@ -111,36 +113,41 @@ export default function ChatModern() {
   const { data: allUsers = [] } = trpc.users.list.useQuery();
   const { data: allRooms = [] } = trpc.chat.listRooms.useQuery();
 
-  const {
-    messages: roomMessages,
-    send: sendRoomMsg,
-    connected: wsConnected,
-  } = useChat(selectedConv?.type === "room" ? selectedConv.id : null);
+  const roomChat = useChat(myId, myName);
+  const globalChat = useGlobalChat();
 
-  const {
-    messages: globalMessages,
-    sendMessage: sendGlobal,
-    wsConnected: globalWsConnected,
-  } = useGlobalChat();
+  useEffect(() => {
+    if (selectedConv?.type === "room") {
+      roomChat.joinRoom(selectedConv.id);
+    }
+  }, [selectedConv?.id, selectedConv?.type]);
 
   const currentMessages = useMemo(() => {
-    if (selectedConv?.type === "room") return roomMessages;
-    return globalMessages;
-  }, [selectedConv, roomMessages, globalMessages]);
+    if (selectedConv?.type === "room") {
+      return roomChat.messages;
+    }
+    return globalChat.messages.map(m => ({
+      id: typeof m.id === "string" ? parseInt(m.id.split("-")[0]) || Date.now() : m.id,
+      senderId: m.senderId,
+      senderName: m.senderName,
+      content: m.content,
+      createdAt: new Date(m.timestamp),
+    })) as ChatMsg[];
+  }, [selectedConv, roomChat.messages, globalChat.messages]);
+
+  const isConnected = selectedConv?.type === "room" ? roomChat.connected : globalChat.connected;
 
   const sendCurrentMessage = useCallback(
     async (content: string) => {
       if (!content.trim()) return;
       if (selectedConv?.type === "room") {
-        await sendRoomMsg(myId, myName, content);
-      } else if (selectedConv?.type === "user") {
-        await sendGlobal(myId, myName, `@${selectedConv.id}:${content}`);
+        roomChat.sendMessage(content.trim());
       } else {
-        await sendGlobal(myId, myName, content);
+        globalChat.send(myId, myName, content.trim());
       }
       setMessageInput("");
     },
-    [selectedConv, myId, myName, sendRoomMsg, sendGlobal]
+    [selectedConv, myId, myName, roomChat, globalChat]
   );
 
   useEffect(() => {
@@ -159,35 +166,31 @@ export default function ChatModern() {
       for (const u of allUsers) {
         if (u.id === myId) continue;
         const existingMsgs = currentMessages.filter(
-          (m: ChatMessage) =>
-            (m.senderId === u.id && m.recipientId === myId) ||
-            (m.senderId === myId && m.recipientId === u.id)
+          (m) => (m.senderId === u.id) || (m.senderId === myId)
         );
         const lastMsg = existingMsgs[existingMsgs.length - 1];
         items.push({
           id: `user-${u.id}`,
           type: "user",
           name: u.name || `Usuario #${u.id}`,
-          avatar: u.avatar || undefined,
+          avatar: undefined,
           lastMessage: lastMsg ? lastMsg.content : undefined,
-          lastMessageAt: lastMsg ? lastMsg.createdAt : undefined,
-          unread: currentMessages.filter(
-            (m: ChatMessage) => m.senderId === u.id && m.recipientId === myId && m.isPrivate
-          ).length,
+          lastMessageAt: lastMsg ? lastMsg.createdAt.toISOString() : undefined,
+          unread: 0,
           online: true,
         });
       }
     } else {
       for (const room of allRooms) {
-        const roomMsgs = roomMessages.filter((m: ChatMessage) => m.roomSlug === room.slug);
+        const roomMsgs = roomChat.messages;
         const lastMsg = roomMsgs[roomMsgs.length - 1];
         items.push({
           id: room.slug,
           type: "room",
           name: room.name,
           lastMessage: lastMsg ? lastMsg.content : undefined,
-          lastMessageAt: lastMsg ? lastMsg.createdAt : undefined,
-          unread: roomMsgs.filter((m: ChatMessage) => m.senderId !== myId).length,
+          lastMessageAt: lastMsg ? lastMsg.createdAt.toISOString() : undefined,
+          unread: 0,
           isPrivate: room.isPrivate,
         });
       }
@@ -197,7 +200,7 @@ export default function ChatModern() {
       return items.filter((i) => i.name.toLowerCase().includes(q));
     }
     return items;
-  }, [activeTab, allUsers, allRooms, currentMessages, roomMessages, myId, searchQuery]);
+  }, [activeTab, allUsers, allRooms, currentMessages, roomChat.messages, myId, searchQuery]);
 
   const activeName = selectedConv?.name ?? "Sala Publica";
   const showSidebar = !isMobile || !selectedConv;
@@ -227,7 +230,7 @@ export default function ChatModern() {
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              {wsConnected || globalWsConnected ? (
+              {isConnected ? (
                 <><Radio className="w-3 h-3 text-emerald-400 animate-pulse" /><span className="text-emerald-400">En linea</span></>
               ) : (
                 <><WifiOff className="w-3 h-3 text-red-400" /><span className="text-red-400">Sin conexion (polling HTTP)</span></>
@@ -278,20 +281,11 @@ export default function ChatModern() {
                     : "hover:bg-slate-800/50 border border-transparent"
                 )}>
                   <div className="relative flex-shrink-0">
-                    {conv.avatar ? (
-                      <img src={conv.avatar} alt="" className="w-11 h-11 rounded-full object-cover border-2 border-slate-700" />
-                    ) : (
-                      <Avatar className={cn("w-11 h-11 border-2 border-slate-700", getAvatarColor(parseInt(conv.id.replace(/[^0-9]/g, "")) || 1))}>
-                        <AvatarFallback className="text-xs font-bold text-white">{getInitials(conv.name)}</AvatarFallback>
-                      </Avatar>
-                    )}
+                    <Avatar className={cn("w-11 h-11 border-2 border-slate-700", getAvatarColor(parseInt(conv.id.replace(/[^0-9]/g, "")) || 1))}>
+                      <AvatarFallback className="text-xs font-bold text-white">{getInitials(conv.name)}</AvatarFallback>
+                    </Avatar>
                     {conv.online && (
                       <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 border-2 border-[#0F172A]" />
-                    )}
-                    {conv.unread > 0 && !conv.online && (
-                      <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-amber-500 text-[10px] font-bold text-black flex items-center justify-center">
-                        {conv.unread > 9 ? "9+" : conv.unread}
-                      </span>
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -305,11 +299,6 @@ export default function ChatModern() {
                     </div>
                     <p className="text-xs text-slate-500 truncate mt-0.5">{conv.lastMessage ?? "Sin mensajes aun"}</p>
                   </div>
-                  {conv.unread > 0 && (
-                    <div className="bg-amber-500 text-black text-[10px] font-bold px-1.5 py-0 h-5 min-w-[20px] flex items-center justify-center flex-shrink-0 rounded-full">
-                      {conv.unread > 99 ? "99+" : conv.unread}
-                    </div>
-                  )}
                 </button>
               ))}
             </div>
@@ -382,7 +371,7 @@ export default function ChatModern() {
                     </div>
                   </div>
                   <div className="space-y-1">
-                    {group.items.map((msg: ChatMessage) => {
+                    {group.items.map((msg) => {
                       const isMine = msg.senderId === myId;
                       return (
                         <motion.div key={msg.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
