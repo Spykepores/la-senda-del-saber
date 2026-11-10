@@ -85,7 +85,10 @@ function lsSaveUsers(users: PresenceUser[]) {
 // ============================================================
 function getWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:3001`;
+  const isDev = window.location.hostname === "localhost";
+  if (isDev) return `${protocol}//${window.location.hostname}:3001`;
+  // En produccion: usar mismo host:puerto que la app (Render/etc)
+  return `${protocol}//${window.location.host}`;
 }
 
 function makeId(ts: number): string {
