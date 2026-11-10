@@ -51,12 +51,9 @@ export function broadcastGameState(roomId: string, state: any): void {
 }
 
 // ============================================================
-// SERVIDOR WEBSOCKET
+// MANEJADOR DE CONEXIONES
 // ============================================================
-export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.0") {
-  const wss = new WebSocketServer({ port, host });
-  console.log(`[WebSocket] Server running on ws://${host}:${port}`);
-
+function attachConnectionHandlers(wss: WebSocketServer) {
   // ---- HEARTBEAT: cerrar conexiones inactivas ----
   const heartbeat = setInterval(() => {
     cleanupStaleClients(60000);
@@ -69,7 +66,6 @@ export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.
 
   // ---- NUEVA CONEXION ----
   wss.on("connection", (ws) => {
-    // Cliente temporal - debe identificarse con join-room
     registerClient(ws, 0, "Anonimo");
 
     ws.on("message", (raw) => {
@@ -79,129 +75,72 @@ export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.
         if (!client) return;
         client.lastPing = Date.now();
 
-        // ============================================================
-        // EVENTOS
-        // ============================================================
         switch (msg.type) {
-
-          // ---- JOIN ROOM ----
           case "join-room": {
             const roomId = msg.roomId;
             const playerId = msg.senderId || 0;
             const playerName = msg.senderName || "Jugador";
             if (!roomId || !playerId) break;
-
-            // Re-registrar con datos reales
             registerClient(ws, playerId, playerName);
             const me = getClient(ws)!;
             me.rooms.add(roomId);
-
-            // Enviar historial de chat
             const history = getChatHistory(roomId);
-            send(ws, {
-              type: "room-users",
-              roomId,
-              users: getPresenceUsers(roomId),
-            });
+            send(ws, { type: "room-users", roomId, users: getPresenceUsers(roomId) });
             if (history.length > 0) {
-              send(ws, {
-                type: "game_state",
-                roomId,
-                history,
-              } as any);
+              send(ws, { type: "game_state", roomId, history } as any);
             }
-
-            // Si es sala de duelo (prefijo duel_), enviar estado real de Postgres
             if (roomId.startsWith("duel_")) {
               const challengeId = Number(roomId.replace("duel_", ""));
               if (!isNaN(challengeId) && challengeId > 0) {
-                const loadAndSend = async () => {
+                (async () => {
                   try {
                     const state = await getFullGameState(challengeId);
-                    if (state) {
-                      send(ws, { type: "game_state", roomId, state });
-                    }
-                  } catch (e) {
-                    // ignore
-                  }
-                };
-                loadAndSend();
+                    if (state) send(ws, { type: "game_state", roomId, state });
+                  } catch { /* ignore */ }
+                })();
               }
             }
-
             sendRoomUsers(roomId);
-
-            // Notificar a otros
             broadcast(roomId, {
-              type: "presence",
-              roomId,
-              senderId: playerId,
-              senderName: playerName,
-              content: "joined",
-              timestamp: Date.now(),
+              type: "presence", roomId, senderId: playerId, senderName: playerName,
+              content: "joined", timestamp: Date.now(),
             }, ws);
             break;
           }
-
-          // ---- LEAVE ROOM ----
           case "leave-room": {
             const roomId = msg.roomId;
             if (!roomId || !client.playerId) break;
-
             client.rooms.delete(roomId);
-
             broadcast(roomId, {
-              type: "presence",
-              roomId,
-              senderId: client.playerId,
-              senderName: client.playerName,
-              content: "left",
-              timestamp: Date.now(),
+              type: "presence", roomId, senderId: client.playerId, senderName: client.playerName,
+              content: "left", timestamp: Date.now(),
             });
-
             sendRoomUsers(roomId);
             break;
           }
-
-          // ---- CHAT MESSAGE ----
           case "chat-message": {
             const roomId = msg.roomId;
             const content = msg.content;
             if (!roomId || !content || !client.playerId) break;
-
             const message = addChatMessage(roomId, client.playerId, client.playerName, content);
-
-            broadcastAll(roomId, {
-              type: "chat-message",
-              roomId,
-              message,
-            });
+            broadcastAll(roomId, { type: "chat-message", roomId, message });
             break;
           }
-
-          // ---- TYPING ----
           case "typing": {
             const roomId = msg.roomId;
             if (!roomId || !client.playerId) break;
             broadcast(roomId, {
-              type: "typing",
-              roomId,
-              senderId: client.playerId,
-              senderName: client.playerName,
+              type: "typing", roomId, senderId: client.playerId, senderName: client.playerName,
             }, ws);
             break;
           }
-
-          // ---- GAME ACTION (duelo - Sistema B) ----
           case "game_action": {
             const roomId = msg.roomId;
             const action = msg.action;
             if (!roomId || !action || !client.playerId) break;
-
             const challengeId = Number(roomId.replace("duel_", ""));
             if (isNaN(challengeId) || challengeId <= 0) break;
-
-            const handleAction = async () => {
+            (async () => {
               try {
                 const result = await applyGameAction(challengeId, action as any, client.playerId);
                 if (result.error) {
@@ -213,52 +152,54 @@ export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.
               } catch (e: any) {
                 send(ws, { type: "game_error" as any, roomId, gameError: e.message || "Error" });
               }
-            };
-            handleAction();
+            })();
             break;
           }
-
-          // ---- PONG ----
-          case "pong": {
+          case "pong":
             break;
-          }
-
           default:
             break;
         }
-      } catch (err) {
-        // Ignorar mensajes malformados
-      }
+      } catch { /* Ignorar mensajes malformados */ }
     });
 
-    // ---- CIERRE DE CONEXION ----
     ws.on("close", () => {
       const c = unregisterClient(ws);
       if (c) {
         for (const roomId of c.rooms) {
           broadcast(roomId, {
-            type: "presence",
-            roomId,
-            senderId: c.playerId,
-            senderName: c.playerName,
-            content: "disconnected",
-            timestamp: Date.now(),
+            type: "presence", roomId, senderId: c.playerId, senderName: c.playerName,
+            content: "disconnected", timestamp: Date.now(),
           });
           sendRoomUsers(roomId);
         }
       }
     });
 
-    ws.on("error", () => {
-      unregisterClient(ws);
-    });
+    ws.on("error", () => unregisterClient(ws));
   });
 
-  // ---- LIMPIEZA AL CERRAR ----
-  wss.on("close", () => {
-    clearInterval(heartbeat);
-  });
+  wss.on("close", () => clearInterval(heartbeat));
+  return wss;
+}
 
+// ============================================================
+// SERVIDOR WEBSOCKET (puerto propio - desarrollo)
+// ============================================================
+export function startWebSocketServer(port: number = 3001, host: string = "0.0.0.0") {
+  const wss = new WebSocketServer({ port, host });
+  console.log(`[WebSocket] Server running on ws://${host}:${port}`);
+  attachConnectionHandlers(wss);
+  return { wss };
+}
+
+// ============================================================
+// SERVIDOR WEBSOCKET sobre HTTP existente (produccion)
+// ============================================================
+export function startWebSocketServerOnExisting(server: any) {
+  const wss = new WebSocketServer({ server });
+  console.log(`[WebSocket] Attached to existing HTTP server`);
+  attachConnectionHandlers(wss);
   return { wss };
 }
 
